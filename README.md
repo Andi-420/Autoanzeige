@@ -70,6 +70,18 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | `TCA9554PWR.*` | IO-Expander (LCD-/Touch-Reset, LCD-CS, Summer) |
 | `I2C_Driver.*` | I2C-Hilfsfunktionen |
 | `lv_conf.h` | LVGL-Konfiguration |
+| `tools/sim/` | UI-Simulator für den PC (siehe unten) |
+
+## UI-Simulator (am PC testen)
+
+Unter `tools/sim/` liegt ein Simulator, der die Seiten mit LVGL am PC rendert und prüft,
+ob Texte oder Buttons über den runden Displayrand hinausragen:
+
+```bash
+tools/sim/build.sh
+```
+
+Details siehe [tools/sim/README.md](tools/sim/README.md).
 
 ## Offene Ideen
 

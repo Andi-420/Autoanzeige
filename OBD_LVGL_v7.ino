@@ -264,9 +264,13 @@ static lv_obj_t* make_screen(void) {
 static lv_obj_t* add_title(lv_obj_t *scr, const char *txt, uint32_t col) {
   lv_obj_t *l = lv_label_create(scr);
   lv_label_set_text(l, txt);
-  lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+  // Oben ist das runde Display schmal: auf Hoehe y=38 sind nur ca. 220 px
+  // sichtbar. Passt der Titel in Schriftgroesse 20 nicht, wird 16 verwendet.
+  const lv_font_t *f = &lv_font_montserrat_20;
+  if (lv_text_get_width(txt, strlen(txt), f, 0) > 210) f = &lv_font_montserrat_16;
+  lv_obj_set_style_text_font(l, f, 0);
   lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
-  lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 22);
+  lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 38);
   return l;
 }
 
@@ -439,8 +443,8 @@ static void build_page_dtc(void) {
   add_title(scr, LV_SYMBOL_WARNING " FEHLERCODES (DTC)", C_ORANGE);
 
   lv_obj_t *cont = lv_obj_create(scr);
-  lv_obj_set_pos(cont, 60, 62);
-  lv_obj_set_size(cont, 360, 310);
+  lv_obj_set_pos(cont, 90, 82);
+  lv_obj_set_size(cont, 300, 230);
   lv_obj_set_style_bg_color(cont, lv_color_hex(C_SURFACE), 0);
   lv_obj_set_style_bg_opa(cont, LV_OPA_COVER, 0);
   lv_obj_set_style_border_color(cont, lv_color_hex(0x222233), 0);
@@ -457,11 +461,11 @@ static void build_page_dtc(void) {
   lv_label_set_text(lbl_dtc_count, "Tippe zum Auslesen");
   lv_obj_set_style_text_font(lbl_dtc_count, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(lbl_dtc_count, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lbl_dtc_count, LV_ALIGN_BOTTOM_MID, 0, -58);
+  lv_obj_align(lbl_dtc_count, LV_ALIGN_CENTER, 0, 98);
 
   lv_obj_t *btn = lv_button_create(scr);
   lv_obj_set_size(btn, 160, 42);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, 0, -14);
+  lv_obj_align(btn, LV_ALIGN_CENTER, 0, 171);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x1A1A3E), 0);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A2A5E), LV_STATE_PRESSED);
   lv_obj_set_style_border_color(btn, lv_color_hex(C_ORANGE), 0);
@@ -502,7 +506,7 @@ static void refresh_dtc_ui(void) {
     lv_label_set_text(lbl_dtc_count, msg);
     lv_obj_set_style_text_color(lbl_dtc_count,
       lv_color_hex(state == DTC_ERROR ? C_RED : C_MUTED), 0);
-    lv_obj_align(lbl_dtc_count, LV_ALIGN_BOTTOM_MID, 0, -58);
+    lv_obj_align(lbl_dtc_count, LV_ALIGN_CENTER, 0, 98);
     return;
   }
 
@@ -517,7 +521,7 @@ static void refresh_dtc_ui(void) {
   lv_label_set_text(lbl_dtc_count, buf);
   lv_obj_set_style_text_color(lbl_dtc_count,
     lv_color_hex(count>0?C_RED:C_GREEN), 0);
-  lv_obj_align(lbl_dtc_count, LV_ALIGN_BOTTOM_MID, 0, -58);
+  lv_obj_align(lbl_dtc_count, LV_ALIGN_CENTER, 0, 98);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -818,7 +822,7 @@ static void build_page_accel(void) {
   lv_obj_align(cross_v, LV_ALIGN_CENTER, 0, -20);
 
   const char *lbl_texts[] = {"BREMSEN", "GAS", "RECHTS", "LINKS"};
-  const int lbl_dx[] = { 0, 0, 115, -115};
+  const int lbl_dx[] = { 0, 0, 160, -160};
   const int lbl_dy[] = {-140, 100, -20, -20};
   for (int i=0; i<4; i++) {
     lv_obj_t *ll = lv_label_create(scr);
@@ -862,43 +866,43 @@ static void build_page_accel(void) {
   lv_label_set_text(lx, "V/Z:");
   lv_obj_set_style_text_font(lx, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(lx, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lx, LV_ALIGN_BOTTOM_LEFT, 10, -55);
+  lv_obj_align(lx, LV_ALIGN_CENTER, -120, 127);
 
   gm_lbl_gx = lv_label_create(scr);
   lv_label_set_text(gm_lbl_gx, "+0.00G");
   lv_obj_set_style_text_font(gm_lbl_gx, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(gm_lbl_gx, lv_color_hex(0x00CCFF), 0);
-  lv_obj_align(gm_lbl_gx, LV_ALIGN_BOTTOM_LEFT, 55, -50);
+  lv_obj_align(gm_lbl_gx, LV_ALIGN_CENTER, -65, 127);
 
   lv_obj_t *ly = lv_label_create(scr);
   lv_label_set_text(ly, "L/R:");
   lv_obj_set_style_text_font(ly, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(ly, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(ly, LV_ALIGN_BOTTOM_MID, -60, -55);
+  lv_obj_align(ly, LV_ALIGN_CENTER, 50, 127);
 
   gm_lbl_gy = lv_label_create(scr);
   lv_label_set_text(gm_lbl_gy, "+0.00G");
   lv_obj_set_style_text_font(gm_lbl_gy, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(gm_lbl_gy, lv_color_hex(0x00FF88), 0);
-  lv_obj_align(gm_lbl_gy, LV_ALIGN_BOTTOM_MID, -10, -50);
+  lv_obj_align(gm_lbl_gy, LV_ALIGN_CENTER, 105, 127);
 
   gm_lbl_gtot = lv_label_create(scr);
   lv_label_set_text(gm_lbl_gtot, "0.00G");
   lv_obj_set_style_text_font(gm_lbl_gtot, &lv_font_montserrat_20, 0);
   lv_obj_set_style_text_color(gm_lbl_gtot, lv_color_hex(C_WHITE), 0);
-  lv_obj_align(gm_lbl_gtot, LV_ALIGN_BOTTOM_RIGHT, -10, -50);
+  lv_obj_align(gm_lbl_gtot, LV_ALIGN_CENTER, -50, 154);
 
   gm_lbl_gmax = lv_label_create(scr);
   lv_label_set_text(gm_lbl_gmax, LV_SYMBOL_UP " MAX: 0.00G");
   lv_obj_set_style_text_font(gm_lbl_gmax, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(gm_lbl_gmax, lv_color_hex(0xFFCC00), 0);
-  lv_obj_align(gm_lbl_gmax, LV_ALIGN_BOTTOM_MID, 0, -20);
+  lv_obj_align(gm_lbl_gmax, LV_ALIGN_CENTER, 0, 185);
 
   lv_obj_t *btn = lv_btn_create(scr);
   lv_obj_set_size(btn, 90, 28);
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x222244), 0);
   lv_obj_set_style_radius(btn, 6, 0);
-  lv_obj_align(btn, LV_ALIGN_BOTTOM_RIGHT, -5, -15);
+  lv_obj_align(btn, LV_ALIGN_CENTER, 60, 154);
   lv_obj_add_event_cb(btn, [](lv_event_t *e){
     gAxMax = 0; gAyMax = 0;
     if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, LV_SYMBOL_UP " MAX: 0.00G");
