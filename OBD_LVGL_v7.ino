@@ -1,14 +1,18 @@
 /*
  * ═══════════════════════════════════════════════════════════════════
- * OBD-II Anzeige v5 — Waveshare ESP32-S3-Touch-LCD-2.1
+ * OBD-II Anzeige v7 — Waveshare ESP32-S3-Touch-LCD-2.1
  * FreeRTOS-Architektur: OBD-Task auf Core 0, LVGL auf Core 1
  *
- * Swipe-Navigation:
- *   ↑ Hoch    → Fehlercodes (DTC)
- *   ↓ Runter  → Helligkeit (Slider)
- *   ← Links   → Ladedruck / Oel-Temperatur
- *   → Rechts  → Beschleunigung (MPU6050/QMI8658)
- *   Mitte     → OBD-Hauptanzeige (Startseite)
+ * Swipe-Navigation (von der Hauptseite aus, Gestenerkennung des CST820):
+ *   SWIPE_UP    → Helligkeit (Slider)
+ *   SWIPE_DOWN  → Fehlercodes (DTC)
+ *   SWIPE_LEFT  → Ladedruck / Oel-Temperatur
+ *   SWIPE_RIGHT → Beschleunigung (QMI8658)
+ *   Von jeder Unterseite: beliebig wischen → zurueck zur Hauptseite
+ *   (Helligkeit: nur vertikal, horizontal bedient den Slider)
+ *
+ * G-Meter: RESET tippen = Max-Werte loeschen,
+ *          RESET lang druecken (Auto steht) = Nullpunkt setzen
  *
  * ELM327: UART1, GPIO43(TX)/GPIO44(RX) + MAX232A
  * IMU:    I2C (GPIO7=SCL, GPIO15=SDA)
@@ -26,6 +30,7 @@
 #include <lvgl.h>
 // QMI8658 via FastIMU library (Arduino Library Manager: "FastIMU" v1.2.6)
 #include <FastIMU.h>
+#include <Preferences.h>
 #include "TCA9554PWR.h"
 #include "Display_ST7701.h"
 #include "Touch_CST820.h"
@@ -86,12 +91,23 @@ static int   gRPM = 0;
 
 // Ladedruck-Berechnung: MAP (Drosselklappen-/Saugrohrdruck) - Umgebungsdruck
 static float gMapKPa = 0.0f;      // PID 0x0B, absoluter Druck nach Drosselklappe (kPa)
-static float gAmbientKPa = 0.0f;  // PID 0x33, Umgebungs-/Barometerdruck (kPa)
+// Default = Normaldruck, falls das Auto PID 0x33 nicht unterstuetzt
+// (sonst wuerde Ladedruck = MAP - 0 => im Leerlauf ca. +1 bar angezeigt)
+static float gAmbientKPa = 101.3f; // PID 0x33, Umgebungs-/Barometerdruck (kPa)
 static float gBoostBar = 0.0f;    // berechneter Ladedruck in bar (kann negativ sein = Unterdruck)
 
-static bool gElmOK = false;
-static bool gOilOK = true;
+static bool gElmOK = false;       // ELM327-Adapter antwortet
+static bool gEcuOK = false;       // Steuergeraet antwortet (Zuendung an)
+static bool gOilOK = false;     // bis zur ersten gueltigen Antwort "N/A" anzeigen
+static bool gIsCan = true;        // Protokoll (nur im OBD-Task benutzt), per ATDPN ermittelt
 static volatile bool gFetchDTC = false;   // gesetzt von LVGL-Task, gelesen von OBD-Task
+
+// DTC-Lesestatus fuer die Anzeige
+#define DTC_IDLE    0
+#define DTC_READING 1
+#define DTC_DONE    2
+#define DTC_ERROR   3
+static int gDtcState = DTC_IDLE;  // unter Mutex
 
 // Flag: neue Daten verfügbar → LVGL-Task soll Display updaten
 static volatile bool gNewData = false;
@@ -101,14 +117,22 @@ static volatile bool gNewDTC = false;
 static bool gMpuOK = false;
 static float gAx=0, gAy=0, gAz=0;
 static float gAxMax=0, gAyMax=0; // Max-G Werte (für GTI G-Meter)
+// Nullpunkt (Einbau-Schraeglage), per langem Druck auf RESET gesetzt, im NVS gespeichert
+static float gOffLong=0, gOffLat=0;
 
 // DTC
 #define DTC_MAX 10
 static String dtcList[DTC_MAX];
 static int dtcCount = 0;
 
-// Helligkeit
+// Helligkeit (wird im NVS-Flash gespeichert und beim Start geladen)
 static uint8_t gBrightness = 80;
+static Preferences prefs;
+
+static void save_brightness(void) {
+  // Nur beim Loslassen/Preset speichern, nicht bei jedem Slider-Schritt (Flash-Verschleiss)
+  if (prefs.getUChar("bright", 0) != gBrightness) prefs.putUChar("bright", gBrightness);
+}
 
 // Swipe: gestenbasiert via CST820-Hardware-Register (kein Koordinatenvergleich)
 
@@ -128,9 +152,22 @@ static uint32_t oil_temp_color(int oil, bool oilOk) {
 // ══════════════════════════════════════════════════════════════════
 // SEITEN-NAVIGATION (vor Touch-Callback definiert)
 // ══════════════════════════════════════════════════════════════════
+static void refresh_main(void);
+static void refresh_dtc_ui(void);
+static void refresh_boost(void);
+static void refresh_accel(void);
+
 static void goto_page(int idx) {
   if (idx < 0 || idx >= PAGE_COUNT) return;
   curPage = idx;
+  // Beim Betreten sofort mit aktuellen Werten fuellen (nicht erst beim naechsten OBD-Zyklus)
+  switch (idx) {
+    case PAGE_MAIN:  refresh_main();   break;
+    case PAGE_BOOST: refresh_boost();  break;
+    case PAGE_DTC:   refresh_dtc_ui(); break;
+    case PAGE_ACCEL: refresh_accel();  break;
+    default: break;
+  }
   lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
 }
 
@@ -148,13 +185,18 @@ static void lvgl_flush_cb(lv_display_t *disp,
 }
 
 static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
-  if (!Touch_interrupts) {
+  // Nur lesen, wenn der Chip einen Interrupt gemeldet hat ODER der Finger
+  // zuletzt noch auflag. Sonst meldete LVGL zwischen zwei Interrupts
+  // "losgelassen" => Slider-Ziehen ruckelt / Buttons loesen doppelt aus.
+  static bool wasPressed = false;
+  if (!Touch_interrupts && !wasPressed) {
     data->state = LV_INDEV_STATE_RELEASED;
     return;
   }
 
   Touch_interrupts = false;
-  Touch_Read_Data();
+  if (!Touch_Read_Data()) touch_data.points = 0;
+  wasPressed = touch_data.points > 0;
 
   // ── Gesten-Navigation ────────────────────────────────────────────
   // Layout:            [Helligkeit]
@@ -172,6 +214,9 @@ static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
         case SWIPE_RIGHT: goto_page(PAGE_ACCEL);  break;
         default: break;
       }
+    } else if (curPage == PAGE_BRIGHT &&
+               (touch_data.gesture == SWIPE_LEFT || touch_data.gesture == SWIPE_RIGHT)) {
+      // Horizontales Wischen = Slider ziehen, NICHT zurueck zur Hauptseite
     } else {
       goto_page(PAGE_MAIN);
     }
@@ -349,10 +394,10 @@ static void update_tile(int idx, const char *vs, int raw, uint32_t col) {
 static void refresh_main(void) {
   float batt;
   int oil, cool, rpm;
-  bool oilOk, elmOk;
+  bool oilOk, elmOk, ecuOk;
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   batt = gBatt; oil = gOilTemp; cool = gCoolant;
-  rpm = gRPM; oilOk = gOilOK; elmOk = gElmOK;
+  rpm = gRPM; oilOk = gOilOK; elmOk = gElmOK; ecuOk = gEcuOK;
   xSemaphoreGive(dataMutex);
 
   char buf[12];
@@ -373,9 +418,11 @@ static void refresh_main(void) {
   snprintf(buf,sizeof(buf),"%d",rpm);
   update_tile(3,buf,rpm,rpm>6000?C_RED:rpm>4500?C_ORANGE:C_CYAN);
 
-  lv_label_set_text(lbl_obd_status, elmOk?"OBD OK":"ELM?");
-  lv_obj_set_style_text_color(lbl_obd_status,
-    lv_color_hex(elmOk?C_GREEN:C_RED), 0);
+  // ELM? = Adapter antwortet nicht | ECU? = Adapter ok, Auto antwortet nicht (Zuendung aus?)
+  const char *st = !elmOk ? "ELM?" : !ecuOk ? "ECU?" : "OBD OK";
+  uint32_t stCol = !elmOk ? C_RED : !ecuOk ? C_YELLOW : C_GREEN;
+  lv_label_set_text(lbl_obd_status, st);
+  lv_obj_set_style_text_color(lbl_obd_status, lv_color_hex(stCol), 0);
   lv_obj_align(lbl_obd_status, LV_ALIGN_CENTER, 0, 0);
 }
 
@@ -425,7 +472,13 @@ static void build_page_dtc(void) {
   lv_obj_set_style_text_font(bl, &lv_font_montserrat_14, 0);
   lv_obj_set_style_text_color(bl, lv_color_hex(C_ORANGE), 0);
   lv_obj_center(bl);
-  lv_obj_add_event_cb(btn, [](lv_event_t*e){ gFetchDTC = true; }, LV_EVENT_CLICKED, nullptr);
+  lv_obj_add_event_cb(btn, [](lv_event_t*e){
+    xSemaphoreTake(dataMutex, portMAX_DELAY);
+    gDtcState = DTC_READING;
+    xSemaphoreGive(dataMutex);
+    gFetchDTC = true;
+    refresh_dtc_ui();
+  }, LV_EVENT_CLICKED, nullptr);
 
   add_nav_dots(scr, PAGE_DTC);
 }
@@ -433,13 +486,25 @@ static void build_page_dtc(void) {
 static void refresh_dtc_ui(void) {
   lv_obj_clean(dtc_list_obj);
   char buf[32];
-  int count;
+  int count, state;
   String codes[DTC_MAX];
 
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   count = dtcCount;
+  state = gDtcState;
   for (int i=0; i<count; i++) codes[i] = dtcList[i];
   xSemaphoreGive(dataMutex);
+
+  if (state != DTC_DONE) {
+    const char *msg = state == DTC_READING ? "Lese Fehlercodes..."
+                    : state == DTC_ERROR   ? "Fehler beim Auslesen"
+                    : "Tippe zum Auslesen";
+    lv_label_set_text(lbl_dtc_count, msg);
+    lv_obj_set_style_text_color(lbl_dtc_count,
+      lv_color_hex(state == DTC_ERROR ? C_RED : C_MUTED), 0);
+    lv_obj_align(lbl_dtc_count, LV_ALIGN_BOTTOM_MID, 0, -58);
+    return;
+  }
 
   for (int i=0; i<count; i++) {
     lv_obj_t *l = lv_label_create(dtc_list_obj);
@@ -459,6 +524,7 @@ static void refresh_dtc_ui(void) {
 // SEITE 2: HELLIGKEIT (SLIDER)
 // ══════════════════════════════════════════════════════════════════
 static lv_obj_t *lbl_bright_val = nullptr;
+static lv_obj_t *bright_slider = nullptr;
 
 static void build_page_brightness(void) {
   lv_obj_t *scr = make_screen();
@@ -490,6 +556,7 @@ static void build_page_brightness(void) {
   lv_obj_align(sl, LV_ALIGN_CENTER, 0, 40);
   lv_slider_set_range(sl, 10, 100);
   lv_slider_set_value(sl, gBrightness, LV_ANIM_OFF);
+  bright_slider = sl;
 
   lv_obj_set_style_bg_color(sl, lv_color_hex(C_RING_BG), LV_PART_MAIN);
   lv_obj_set_style_radius(sl, 10, LV_PART_MAIN);
@@ -507,6 +574,8 @@ static void build_page_brightness(void) {
     lv_label_set_text(lbl_bright_val, buf2);
     lv_obj_align(lbl_bright_val, LV_ALIGN_CENTER, 0, -40);
   }, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(sl, [](lv_event_t*e){ save_brightness(); },
+                      LV_EVENT_RELEASED, nullptr);
 
   const uint8_t presets[] = {25,50,75,100};
   const char* plabels[] = {"25%","50%","75%","100%"};
@@ -530,6 +599,8 @@ static void build_page_brightness(void) {
         (lv_obj_t*)lv_event_get_target(e));
       gBrightness = pct;
       Set_Backlight(pct);
+      save_brightness();
+      if (bright_slider) lv_slider_set_value(bright_slider, pct, LV_ANIM_ON);
       char buf3[8]; snprintf(buf3,sizeof(buf3),"%d%%",pct);
       lv_label_set_text(lbl_bright_val, buf3);
       lv_obj_align(lbl_bright_val, LV_ALIGN_CENTER, 0, -40);
@@ -833,6 +904,14 @@ static void build_page_accel(void) {
     if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, LV_SYMBOL_UP " MAX: 0.00G");
     if (gm_dot_max) lv_obj_align(gm_dot_max, LV_ALIGN_CENTER, 0, -20);
   }, LV_EVENT_CLICKED, nullptr);
+  // Lang druecken (im stehenden Auto): aktuelle Lage als Nullpunkt uebernehmen
+  lv_obj_add_event_cb(btn, [](lv_event_t *e){
+    gOffLong = gAz; gOffLat = gAy;
+    prefs.putFloat("offLong", gOffLong);
+    prefs.putFloat("offLat", gOffLat);
+    gAxMax = 0; gAyMax = 0;
+    if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, "NULLPUNKT GESETZT");
+  }, LV_EVENT_LONG_PRESSED, nullptr);
   lv_obj_t *btn_lbl = lv_label_create(btn);
   lv_label_set_text(btn_lbl, LV_SYMBOL_REFRESH " RESET");
   lv_obj_set_style_text_font(btn_lbl, &lv_font_montserrat_12, 0);
@@ -853,8 +932,8 @@ static void refresh_accel(void) {
   // Links/Rechts-Achse (Y, war schon korrekt) gedreht verbaut ist -
   // die reale Vor/Zurueck-Beschleunigung erscheint dadurch auf der
   // Z-Achse des Sensors statt auf X.
-  float ax_g = gAz;   // Laengsachse (Bremsen/Gas) - vorher: gAx / 9.81f
-  float ay_g = gAy;   // Querachse  (Links/Rechts) - unveraendert, war schon korrekt
+  float ax_g = gAz - gOffLong;  // Laengsachse (Bremsen/Gas) - vorher: gAx / 9.81f
+  float ay_g = gAy - gOffLat;   // Querachse  (Links/Rechts) - unveraendert, war schon korrekt
 
   float ax_abs = fabsf(ax_g);
   float ay_abs = fabsf(ay_g);
@@ -920,11 +999,22 @@ static String elmSendCmd(const char *cmd, uint32_t ms = 2000) {
     if (elmSerial.available()) {
       char c = elmSerial.read();
       if (c == '>') break;
-      if (c != '\r') r += c;
+      if (c == '\r') c = '\n';   // Zeilengrenzen behalten (fuer Multi-Frame-DTC)
+      r += c;
+    } else {
+      vTaskDelay(1);  // CPU abgeben statt Busy-Wait (Idle-Task/Watchdog auf Core 0)
     }
   }
   r.trim();
   return r;
+}
+
+// Antwort des ELM327 selbst ist leer => Adapter antwortet nicht (abgezogen/tot)
+// Antworten wie NO DATA / UNABLE TO CONNECT => ELM ok, aber Steuergeraet schweigt
+static bool elmIsEcuError(const String &r) {
+  return r.indexOf("NO DATA") >= 0 || r.indexOf("UNABLE") >= 0 ||
+         r.indexOf("ERROR") >= 0   || r.indexOf("STOPPED") >= 0 ||
+         r.indexOf("?") >= 0;
 }
 
 static bool elmParseOBD(const String &resp, const char *tag,
@@ -935,7 +1025,8 @@ static bool elmParseOBD(const String &resp, const char *tag,
     int idx = resp.indexOf(n);
     if (idx < 0) continue;
     String d = resp.substring(idx + n.length());
-    d.trim(); d.replace(" ","");
+    d.trim(); d.replace(" ",""); d.replace("\n","");
+    if (d.length() < 2 || !isHexadecimalDigit(d[0]) || !isHexadecimalDigit(d[1])) continue;
     if (d.length() < 2) continue;
     A = (uint8_t)strtol(d.substring(0,2).c_str(), nullptr, 16);
     B = (d.length() >= 4)
@@ -955,46 +1046,166 @@ static void elmInit(void) {
   Serial.print("[ELM] "); Serial.println(ver);
   elmSendCmd("ATE0"); elmSendCmd("ATL0"); elmSendCmd("ATS0");
   elmSendCmd("ATH0"); elmSendCmd("ATSP0"); elmSendCmd("ATAT1");
+
+  // Erste Anfrage loest die automatische Protokollsuche aus (kann dauern),
+  // danach das erkannte Protokoll abfragen: 6..9 = CAN (A..C ebenfalls CAN).
+  elmSendCmd("0100", 8000);
+  String dp = elmSendCmd("ATDPN", 1000);
+  dp.replace("A", "");   // "A6" = automatisch gewaehlt, Protokoll 6
+  if (dp.length() > 0) {
+    char p = dp[dp.length() - 1];
+    gIsCan = (p >= '6' && p <= '9') || (p >= 'A' && p <= 'C');
+  }
+  Serial.printf("[ELM] Protokoll %s (%s)\n", dp.c_str(), gIsCan ? "CAN" : "kein CAN");
+
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   gElmOK = true;
   xSemaphoreGive(dataMutex);
   Serial.println("[ELM] OK");
 }
 
+// ── DTC-Auswertung (Mode 03) ────────────────────────────────────────
+// Reine C-Funktion ohne Arduino-Abhaengigkeiten (auf dem PC testbar).
+// resp: ELM-Antwort, Zeilen durch '\n' getrennt, mit/ohne Leerzeichen.
+//   CAN, 1 Frame:      "43 02 01 23 04 56"          (Byte nach 43 = Anzahl)
+//   CAN, Multi-Frame:  "00A\n0: 43 04 01 23 04 56\n1: 07 89 0A BC 00 00"
+//   K-Line/J1850:      "43 01 23 04 56 00 00"       (je Zeile 3 Codes, 0000 = leer)
+// Liefert Anzahl Codes, oder -1 wenn keine gueltige Antwort.
+static void dtc_format(uint8_t b1, uint8_t b2, char *out) {
+  static const char pfx[] = {'P', 'C', 'B', 'U'};
+  // Format: Buchstabe + 4 Hex-Stellen, z.B. 0x01 0x23 -> "P0123"
+  snprintf(out, 6, "%c%02X%02X", pfx[(b1 >> 6) & 0x03], b1 & 0x3F, b2);
+}
+
+static int hexval(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  return -1;
+}
+
+static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
+  // 1) In Nachrichten zerlegen: je Nachricht nur Hex-Zeichen sammeln
+  const int MAXMSG = 8, MAXHEX = 128;
+  char msgs[MAXMSG][MAXHEX + 1];
+  int nMsg = 0;
+  bool any = false;
+
+  const char *p = resp;
+  while (*p) {
+    const char *eol = strchr(p, '\n');
+    if (!eol) eol = p + strlen(p);
+
+    char line[MAXHEX + 1]; int ll = 0;
+    for (const char *q = p; q < eol && ll < MAXHEX; q++)
+      if (*q != ' ') line[ll++] = *q;
+    line[ll] = 0;
+    p = (*eol) ? eol + 1 : eol;
+
+    if (ll == 0) continue;
+    if (strstr(line, "NODATA")) { any = true; continue; }  // keine Codes gespeichert
+
+    bool cont = false;
+    const char *data = line;
+    if (ll >= 2 && line[1] == ':' && hexval(line[0]) >= 0) {   // "N:" Multi-Frame
+      cont = (line[0] != '0');
+      data = line + 2;
+    } else {
+      bool allHex = true;
+      for (int i = 0; i < ll; i++) if (hexval(line[i]) < 0) { allHex = false; break; }
+      if (!allHex) continue;                 // z.B. "SEARCHING..."
+      if (ll <= 3) continue;                 // Multi-Frame-Laengenzeile "00A"
+    }
+
+    if (!cont) {
+      if (strncmp(data, "43", 2) != 0 || nMsg >= MAXMSG) continue;
+      msgs[nMsg][0] = 0;
+      nMsg++;
+    } else if (nMsg == 0) {
+      continue;
+    }
+    strncat(msgs[nMsg - 1], data, MAXHEX - strlen(msgs[nMsg - 1]));
+  }
+
+  // 2) Nachrichten dekodieren
+  int count = 0;
+  for (int m = 0; m < nMsg; m++) {
+    const char *h = msgs[m] + 2;   // hinter "43"
+    int len = strlen(h);
+    int num;
+    if (isCan) {
+      if (len < 2) continue;
+      num = hexval(h[0]) * 16 + hexval(h[1]);
+      h += 2; len -= 2;
+    } else {
+      num = len / 4;
+    }
+    any = true;
+    for (int i = 0; i < num && len >= 4 && count < maxOut; i++, h += 4, len -= 4) {
+      int a1 = hexval(h[0]), a2 = hexval(h[1]), a3 = hexval(h[2]), a4 = hexval(h[3]);
+      if (a1 < 0 || a2 < 0 || a3 < 0 || a4 < 0) break;
+      uint8_t b1 = a1 * 16 + a2, b2 = a3 * 16 + a4;
+      if (b1 == 0 && b2 == 0) continue;
+      char code[6];
+      dtc_format(b1, b2, code);
+      bool dup = false;   // mehrere Steuergeraete koennen denselben Code melden
+      for (int k = 0; k < count; k++) if (!strcmp(out[k], code)) { dup = true; break; }
+      if (!dup) strcpy(out[count++], code);
+    }
+  }
+  return any ? count : -1;
+}
+
 static void elmFetchDTC(void) {
-  String resp = elmSendCmd("03", 4000);
-  int pos = resp.indexOf("43");
-  if (pos < 0) return;
-  String data = resp.substring(pos + 2);
-  data.trim(); data.replace(" ","");
-  if (data.length() < 2) return;
-  int num = (int)strtol(data.substring(0,2).c_str(), nullptr, 16) & 0x7F;
-  data = data.substring(2);
+  String resp = elmSendCmd("03", 5000);
+  char codes[DTC_MAX][6];
+  int n = resp.length() ? dtc_parse(resp.c_str(), gIsCan, codes, DTC_MAX) : -1;
+  Serial.printf("[DTC] Antwort '%s' -> %d\n", resp.c_str(), n);
 
   xSemaphoreTake(dataMutex, portMAX_DELAY);
-  dtcCount = 0;
-  for (int i = 0; i < num && dtcCount < DTC_MAX && data.length() >= 4; i++) {
-    uint8_t b1 = (uint8_t)strtol(data.substring(0,2).c_str(), nullptr, 16);
-    uint8_t b2 = (uint8_t)strtol(data.substring(2,4).c_str(), nullptr, 16);
-    data = data.substring(4);
-    if (b1 == 0 && b2 == 0) continue;
-    char prefix;
-    switch ((b1 >> 6) & 0x03) {
-      case 0: prefix='P'; break; case 1: prefix='C'; break;
-      case 2: prefix='B'; break; default: prefix='U'; break;
-    }
-    char code[8];
-    snprintf(code, sizeof(code), "%c%X%02X", prefix, (b1 & 0x3F), b2);
-    dtcList[dtcCount++] = String(code);
+  if (n >= 0) {
+    dtcCount = n;
+    for (int i = 0; i < n; i++) dtcList[i] = String(codes[i]);
+    gDtcState = DTC_DONE;
+  } else {
+    gDtcState = DTC_ERROR;
   }
   gNewDTC = true;
   xSemaphoreGive(dataMutex);
 }
 
+// Fehlerzaehler (nur im OBD-Task benutzt)
+static uint8_t sElmSilent = 0;  // aufeinanderfolgende Kommandos ganz ohne Antwort
+static uint8_t sEcuFail = 0;    // aufeinanderfolgende PID-Abfragen ohne gueltige Daten
+
+// PID abfragen + Verbindungsstatistik fuehren
+static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
+  String r = elmSendCmd(cmd, 2500);
+  if (r.length() == 0) {
+    if (sElmSilent < 255) sElmSilent++;
+    return false;
+  }
+  sElmSilent = 0;
+  if (elmParseOBD(r, tag, a, b)) {
+    sEcuFail = 0;
+    return true;
+  }
+  if (elmIsEcuError(r) && sEcuFail < 255) sEcuFail++;
+  return false;
+}
+
+#define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel
+#define AMB_MS       10000UL   // Umgebungsdruck
+#define OIL_MAX_FAIL  5
+#define OIL_RETRY_MS 30000UL
+
 static void obdTask(void *param) {
   elmSerial.begin(ELM_BAUD, SERIAL_8N1, ELM_RX, ELM_TX);
   delay(1000);
   elmInit();
+
+  uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0;
+  uint8_t oilFail = 0;
 
   for (;;) {
     if (gFetchDTC) {
@@ -1010,6 +1221,8 @@ static void obdTask(void *param) {
     if (!ok) {
       delay(5000);
       elmInit();
+      sElmSilent = 0;
+      sEcuFail = 0;
       continue;
     }
 
@@ -1018,45 +1231,70 @@ static void obdTask(void *param) {
     int rpm = gRPM;
     int cool = gCoolant;
     int oil = gOilTemp;
-    bool oilOk = true;  // wird JEDEN Zyklus neu ermittelt - keine Zustandssperre mehr
+    bool oilOk = gOilOK;
 
     float mapKPa = gMapKPa;
     float ambKPa = gAmbientKPa;
     float boostBar = gBoostBar;
 
-    String v = elmSendCmd("ATRV", 2000);
-    if (v.length() > 1 && v != "?") batt = v.toFloat();
+    uint32_t now = millis();
 
-    if (elmParseOBD(elmSendCmd("010C", 2500), "410C", a, b))
+    // ── Schnelle Werte: JEDEN Zyklus (Drehzahl, Ladedruck) ─────────
+    if (obdQuery("010C", "410C", a, b))
       rpm = ((int)a * 256 + b) / 4;
 
-    if (elmParseOBD(elmSendCmd("0105", 2500), "4105", a, b))
-      cool = (int)a - 40;
+    // Ladedruck: MAP (Drosselklappendruck, PID 0x0B) minus Umgebungsdruck (PID 0x33)
+    if (obdQuery("010B", "410B", a, b))
+      mapKPa = (float)a; // PID 0x0B liefert Druck direkt in kPa (0-255)
 
-    // Oel-Temperatur (PID 0x5C) - JEDEN Zyklus neu versuchen (keine
-    // dauerhafte Sperre mehr nach dem ersten NO-DATA/Fehler).
-    {
-      String oil_r = elmSendCmd("015C", 2500);
-      if (elmParseOBD(oil_r, "415C", a, b)) {
-        oil = (int)a - 40;
-        oilOk = true;
-      } else {
-        oilOk = false;
+    // ── Langsame Werte: ca. 1x pro Sekunde ─────────────────────────
+    if (now - tSlow >= SLOW_MS) {
+      tSlow = now;
+
+      String v = elmSendCmd("ATRV", 2000);
+      if (v.length() == 0) { if (sElmSilent < 255) sElmSilent++; }
+      else {
+        sElmSilent = 0;
+        float f = v.toFloat();   // "12.6V" -> 12.6
+        if (f > 1.0f) batt = f;
+      }
+
+      if (obdQuery("0105", "4105", a, b))
+        cool = (int)a - 40;
+
+      // Oel-Temperatur (PID 0x5C): viele Autos kennen diese PID nicht und
+      // antworten jedes Mal mit NO DATA. Nach OIL_MAX_FAIL Fehlversuchen
+      // nur noch alle OIL_RETRY_MS erneut probieren (keine Dauersperre).
+      bool oilDue = (oilFail < OIL_MAX_FAIL) || (now - tOilRetry >= OIL_RETRY_MS);
+      if (oilDue) {
+        if (obdQuery("015C", "415C", a, b)) {
+          oil = (int)a - 40;
+          oilOk = true;
+          oilFail = 0;
+        } else {
+          oilOk = false;
+          if (oilFail < 255) oilFail++;
+          tOilRetry = now;
+        }
       }
     }
 
-    // Ladedruck: MAP (Drosselklappendruck, PID 0x0B) minus Umgebungsdruck (PID 0x33)
-    if (elmParseOBD(elmSendCmd("010B", 2500), "410B", a, b)) {
-      mapKPa = (float)a; // PID 0x0B liefert Druck direkt in kPa (0-255)
-    }
-
-    if (elmParseOBD(elmSendCmd("0133", 2500), "4133", a, b)) {
-      ambKPa = (float)a; // PID 0x33 = absoluter Umgebungs-/Barometerdruck in kPa
+    // ── Umgebungsdruck aendert sich kaum: alle 10 s ────────────────
+    if (tAmb == 0 || now - tAmb >= AMB_MS) {
+      tAmb = now;
+      if (obdQuery("0133", "4133", a, b) && a > 50)
+        ambKPa = (float)a; // PID 0x33 = absoluter Umgebungs-/Barometerdruck in kPa
     }
 
     boostBar = (mapKPa - ambKPa) / 100.0f; // kPa -> bar
-    if (boostBar < -0.5f) boostBar = -0.5f;
-    if (boostBar > 1.5f)  boostBar = 1.5f;
+    // Grenzen nur gegen Unsinn; Benziner haben im Leerlauf/Schub ca. -0.7 bar
+    if (boostBar < -1.0f) boostBar = -1.0f;
+    if (boostBar > 2.5f)  boostBar = 2.5f;
+
+    // ── Verbindungsstatus ─────────────────────────────────────────
+    bool elmOk = sElmSilent < 3;          // 3x gar keine Antwort => Adapter weg
+    bool ecuOk = elmOk && sEcuFail < 4;   // ELM da, aber Steuergeraet schweigt
+    if (!elmOk) Serial.println("[ELM] keine Antwort mehr -> Neuinitialisierung");
 
     xSemaphoreTake(dataMutex, portMAX_DELAY);
     gBatt = batt;
@@ -1067,10 +1305,12 @@ static void obdTask(void *param) {
     gAmbientKPa = ambKPa;
     gBoostBar = boostBar;
     gOilOK = oilOk;
+    gElmOK = elmOk;
+    gEcuOK = ecuOk;
     gNewData = true;
     xSemaphoreGive(dataMutex);
 
-    delay(100); // kurze Pause, dann nächster Zyklus
+    delay(20); // kurze Pause, dann nächster Zyklus
   }
 }
 
@@ -1082,8 +1322,7 @@ void setup() {
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 3000);
   delay(200);
-  Serial.println("\n=== OBD-II v5 ===");
-  printf("\n=== OBD-II v5 (printf) ===\n");
+  Serial.println("\n=== OBD-II v7 ===");
 
   if (!psramFound()) {
     Serial.println("PSRAM fehlt!"); while (1) delay(1000);
@@ -1142,6 +1381,11 @@ void setup() {
 
   // ── 5. Display initialisieren ─────────────────────────────
   LCD_Init();
+  prefs.begin("obd", false);
+  gBrightness = constrain(prefs.getUChar("bright", 80), 10, 100);
+  Set_Backlight(gBrightness);
+  gOffLong = prefs.getFloat("offLong", 0.0f);
+  gOffLat  = prefs.getFloat("offLat", 0.0f);
   Serial.println("[LCD] OK");
 
   pinMode(CST820_INT_PIN, INPUT_PULLUP);
@@ -1191,6 +1435,7 @@ void setup() {
 // LOOP — läuft auf Core 1, NUR LVGL + Display-Updates
 // ══════════════════════════════════════════════════════════════════
 static uint32_t lastMPU = 0;
+static uint32_t lastAccelUi = 0;
 
 void loop() {
   lv_task_handler();
@@ -1211,15 +1456,21 @@ void loop() {
   xSemaphoreGive(dataMutex);
   if (newDTC && curPage == PAGE_DTC) refresh_dtc_ui();
 
-  if (gMpuOK && millis() - lastMPU >= 100) {
+  // IMU mit 50 Hz lesen und glaetten (Motor-/Strassenvibrationen),
+  // Anzeige aber nur mit 10 Hz aktualisieren
+  if (gMpuOK && millis() - lastMPU >= 20) {
     AccelData accelData;
     imu.update();
     imu.getAccel(&accelData);
-    gAx = accelData.accelX;
-    gAy = accelData.accelY;
-    gAz = accelData.accelZ;
-    if (curPage == PAGE_ACCEL) refresh_accel();
+    const float k = 0.2f;   // Glaettungsfaktor (kleiner = ruhiger, traeger)
+    gAx += k * (accelData.accelX - gAx);
+    gAy += k * (accelData.accelY - gAy);
+    gAz += k * (accelData.accelZ - gAz);
     lastMPU = millis();
+  }
+  if (gMpuOK && curPage == PAGE_ACCEL && millis() - lastAccelUi >= 100) {
+    refresh_accel();
+    lastAccelUi = millis();
   }
 
   delay(5); // 5ms -> ~200 LVGL-Ticks/s, Touch reagiert fluessig
