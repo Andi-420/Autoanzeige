@@ -1287,9 +1287,8 @@ static void obdTask(void *param) {
     }
 
     boostBar = (mapKPa - ambKPa) / 100.0f; // kPa -> bar
-    // Grenzen nur gegen Unsinn; Benziner haben im Leerlauf/Schub ca. -0.7 bar
-    if (boostBar < -1.0f) boostBar = -1.0f;
-    if (boostBar > 2.5f)  boostBar = 2.5f;
+    if (boostBar < -0.5f) boostBar = -0.5f;
+    if (boostBar > 1.5f)  boostBar = 1.5f;
 
     // ── Verbindungsstatus ─────────────────────────────────────────
     bool elmOk = sElmSilent < 3;          // 3x gar keine Antwort => Adapter weg
