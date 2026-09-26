@@ -1,6 +1,6 @@
 # UI-Simulator
 
-Rendert die Seiten von `OBD_LVGL_v7.ino` am PC als Bilder, ohne Board und ohne Flashen.
+Rendert die Seiten von `OBD.ino` am PC als Bilder, ohne Board und ohne Flashen.
 Der echte Sketch wird gegen LVGL 9.5.0 kompiliert (dieselbe Version wie in der Arduino IDE); Arduino, ESP32, FreeRTOS, Display,
 Touch, IMU und NVS werden durch einfache Stubs in `stub/` ersetzt.
 
