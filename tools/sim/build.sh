@@ -4,7 +4,7 @@
 set -e
 SIM="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SIM/../.." && pwd)"
-LVGL_VER="${LVGL_VER:-v9.2.2}"
+LVGL_VER="${LVGL_VER:-v9.5.0}"  # wie in der Arduino IDE installiert
 B="$SIM/build/$LVGL_VER"
 mkdir -p "$B"
 

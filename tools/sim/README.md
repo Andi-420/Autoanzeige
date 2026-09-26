@@ -1,7 +1,7 @@
 # UI-Simulator
 
 Rendert die Seiten von `OBD_LVGL_v7.ino` am PC als Bilder, ohne Board und ohne Flashen.
-Der echte Sketch wird gegen LVGL 9.2.2 kompiliert; Arduino, ESP32, FreeRTOS, Display,
+Der echte Sketch wird gegen LVGL 9.5.0 kompiliert (dieselbe Version wie in der Arduino IDE); Arduino, ESP32, FreeRTOS, Display,
 Touch, IMU und NVS werden durch einfache Stubs in `stub/` ersetzt.
 
 Zusätzlich prüft der Simulator jede Beschriftung und jeden Button darauf, ob er
@@ -33,7 +33,7 @@ Seite boost:
 Seite accel:
   [accel] AUSSERHALB r=295  (10,410)-(32,424)  'V/Z:'     <- Beispiel für einen Fehler
 Gesamt ausserhalb: 0
-Bilder: tools/sim/build/v9.2.2/out_*.png
+Bilder: tools/sim/build/v9.5.0/out_*.png
 ```
 
 Die Bilder liegen in `tools/sim/build/<LVGL-Version>/` (`out_main.png`, `out_boost.png`, ...).
@@ -54,4 +54,4 @@ Texte erzeugen, z. B. negative Zahlen oder vierstellige Drehzahlen.
   laufen nicht (die Stubs liefern feste Werte).
 - Andere LVGL-Version (am besten die, die in der Arduino IDE installiert ist):
   `LVGL_VER=v9.1.0 tools/sim/build.sh`. Jede Version bekommt einen eigenen Ordner unter `build/`.
-  Getestet: v9.0.0, v9.1.0, v9.2.2.
+  Getestet: v9.0.0, v9.1.0, v9.2.2, v9.5.0.
