@@ -53,17 +53,17 @@ uint8_t Touch_Init(void) {
 
 uint8_t Touch_Read_Data(void) {
   uint8_t buf[6] = {0};
-  tp_read(CST820_REG_GestureID, buf, 6);
+  if (!tp_read(CST820_REG_GestureID, buf, 6)) return false;
   if (buf[0] != 0x00) touch_data.gesture = (GESTURE)buf[0];
-  if (buf[1] != 0x00) {
-    noInterrupts();
-    touch_data.points = buf[1];
-    if (touch_data.points > CST820_LCD_TOUCH_MAX_POINTS)
-      touch_data.points = CST820_LCD_TOUCH_MAX_POINTS;
+  noInterrupts();
+  touch_data.points = buf[1];
+  if (touch_data.points > CST820_LCD_TOUCH_MAX_POINTS)
+    touch_data.points = CST820_LCD_TOUCH_MAX_POINTS;
+  if (touch_data.points) {   // Koordinaten nur bei Beruehrung gueltig
     touch_data.x = ((buf[2] & 0x0F) << 8) | buf[3];
     touch_data.y = ((buf[4] & 0x0F) << 8) | buf[5];
-    interrupts();
   }
+  interrupts();
   return true;
 }
 
