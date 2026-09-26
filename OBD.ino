@@ -266,9 +266,10 @@ static lv_obj_t* add_title(lv_obj_t *scr, const char *txt, uint32_t col) {
   lv_label_set_text(l, txt);
   // Oben ist das runde Display schmal: auf Hoehe y=38 sind nur ca. 220 px
   // sichtbar. Passt der Titel in Schriftgroesse 20 nicht, wird 16 verwendet.
-  const lv_font_t *f = &lv_font_montserrat_20;
-  if (lv_text_get_width(txt, strlen(txt), f, 0) > 210) f = &lv_font_montserrat_16;
-  lv_obj_set_style_text_font(l, f, 0);
+  // (Breite ueber das Label selbst gemessen - funktioniert in allen LVGL-9.x-Versionen)
+  lv_obj_set_style_text_font(l, &lv_font_montserrat_20, 0);
+  lv_obj_update_layout(l);
+  if (lv_obj_get_width(l) > 210) lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
   lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 38);
   return l;

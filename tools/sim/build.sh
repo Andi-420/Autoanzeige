@@ -4,8 +4,8 @@
 set -e
 SIM="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SIM/../.." && pwd)"
-LVGL_VER="${LVGL_VER:-v9.2.2}"
-B="$SIM/build"
+LVGL_VER="${LVGL_VER:-v9.5.0}"  # wie in der Arduino IDE installiert
+B="$SIM/build/$LVGL_VER"
 mkdir -p "$B"
 
 # 1) LVGL holen (einmalig)
@@ -36,7 +36,7 @@ if [ ! -f "$B/liblvgl.a" ]; then
 fi
 
 # 4) Sketch + Simulator bauen und ausfuehren
-cp "$ROOT/OBD_LVGL_v7.ino" "$B/sketch.cpp"
+cp "$ROOT/OBD.ino" "$B/sketch.cpp"
 g++ -std=gnu++17 -Wall -Wno-unused -DLV_CONF_INCLUDE_SIMPLE \
     -I"$B" -I"$SIM/stub" -I"$B/lvgl" -include Arduino.h \
     "$SIM/sim_main.cpp" "$B/liblvgl.a" -lm -o "$B/sim"

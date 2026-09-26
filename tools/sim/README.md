@@ -1,7 +1,7 @@
 # UI-Simulator
 
-Rendert die Seiten von `OBD_LVGL_v7.ino` am PC als Bilder, ohne Board und ohne Flashen.
-Der echte Sketch wird gegen LVGL 9.2.2 kompiliert; Arduino, ESP32, FreeRTOS, Display,
+Rendert die Seiten von `OBD.ino` am PC als Bilder, ohne Board und ohne Flashen.
+Der echte Sketch wird gegen LVGL 9.5.0 kompiliert (dieselbe Version wie in der Arduino IDE); Arduino, ESP32, FreeRTOS, Display,
 Touch, IMU und NVS werden durch einfache Stubs in `stub/` ersetzt.
 
 Zusätzlich prüft der Simulator jede Beschriftung und jeden Button darauf, ob er
@@ -20,7 +20,7 @@ Linux, macOS oder Windows mit WSL, sowie:
 tools/sim/build.sh
 ```
 
-Beim ersten Start wird LVGL nach `tools/sim/build/lvgl` geklont und einmalig gebaut
+Beim ersten Start wird LVGL nach `tools/sim/build/<Version>/lvgl` geklont und einmalig gebaut
 (dauert ein bis zwei Minuten). Danach geht jeder Durchlauf in wenigen Sekunden.
 
 Ausgabe:
@@ -33,10 +33,10 @@ Seite boost:
 Seite accel:
   [accel] AUSSERHALB r=295  (10,410)-(32,424)  'V/Z:'     <- Beispiel für einen Fehler
 Gesamt ausserhalb: 0
-Bilder: tools/sim/build/out_*.png
+Bilder: tools/sim/build/v9.5.0/out_*.png
 ```
 
-Die Bilder liegen in `tools/sim/build/` (`out_main.png`, `out_boost.png`, ...).
+Die Bilder liegen in `tools/sim/build/<LVGL-Version>/` (`out_main.png`, `out_boost.png`, ...).
 Der Bereich außerhalb des runden Displays ist dunkelrot eingefärbt.
 Das Skript endet mit Fehlercode 1, wenn etwas außerhalb liegt.
 
@@ -52,4 +52,6 @@ Texte erzeugen, z. B. negative Zahlen oder vierstellige Drehzahlen.
   `stub/Arduino.h` (oder dem passenden Stub) ergänzt werden, sonst schlägt der Build fehl.
 - Der Simulator prüft nur die Oberfläche. OBD-Kommunikation, Touch und Sensoren
   laufen nicht (die Stubs liefern feste Werte).
-- Andere LVGL-Version: `LVGL_VER=v9.3.0 tools/sim/build.sh` (vorher `tools/sim/build/` löschen).
+- Andere LVGL-Version (am besten die, die in der Arduino IDE installiert ist):
+  `LVGL_VER=v9.1.0 tools/sim/build.sh`. Jede Version bekommt einen eigenen Ordner unter `build/`.
+  Getestet: v9.0.0, v9.1.0, v9.2.2, v9.5.0.

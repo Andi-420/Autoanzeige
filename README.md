@@ -17,9 +17,10 @@ Gedacht für einen **Skoda Fabia 3 mit 1.0 TSI** (CAN-Bus).
 - Arduino IDE mit ESP32-Core 3.x
 - Board-Einstellungen: **ESP32S3 Dev Module**, **PSRAM: OPI**, **USB CDC On Boot: Enabled**
 - Bibliotheken:
-  - **LVGL** ≥ 9.1
+  - **LVGL** 9.x (verwendet: 9.5; getestet im Simulator mit 9.0 – 9.5)
   - **FastIMU** (1.2.6, für den QMI8658)
 - `lv_conf.h` liegt im Sketch-Ordner (siehe Kommentar in der Datei)
+- Die Arduino IDE verlangt, dass der Ordner genauso heißt wie der Sketch: `OBD.ino` muss in einem Ordner `OBD` liegen
 
 Architektur: Der OBD-Task läuft auf Core 0 (blockierende UART-Kommunikation), LVGL und die Anzeige auf Core 1. Die Messwerte werden über einen Mutex ausgetauscht.
 
@@ -64,7 +65,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 
 | Datei | Inhalt |
 |---|---|
-| `OBD_LVGL_v7.ino` | Hauptprogramm: Oberfläche, OBD-Task, IMU |
+| `OBD.ino` | Hauptprogramm: Oberfläche, OBD-Task, IMU |
 | `Display_ST7701.*` | Display-Initialisierung (SPI + RGB-Panel) und Hintergrundbeleuchtung |
 | `Touch_CST820.*` | Touch-Controller inkl. Hardware-Gestenerkennung |
 | `TCA9554PWR.*` | IO-Expander (LCD-/Touch-Reset, LCD-CS, Summer) |
@@ -74,7 +75,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 
 ## UI-Simulator (am PC testen)
 
-Unter `tools/sim/` liegt ein Simulator, der die Seiten mit LVGL am PC rendert und prüft,
+Unter `tools/sim/` liegt ein Simulator, der die Seiten mit LVGL 9.5 am PC rendert und prüft,
 ob Texte oder Buttons über den runden Displayrand hinausragen:
 
 ```bash

@@ -1,5 +1,5 @@
 /*
- * Host-Simulator fuer die Oberflaeche von OBD_LVGL_v7.ino
+ * Host-Simulator fuer die Oberflaeche von OBD.ino
  * Baut den echten Sketch gegen LVGL (Arduino/ESP32/FreeRTOS werden durch
  * Stubs in stub/ ersetzt), rendert alle Seiten als Bild und prueft, ob
  * Beschriftungen/Buttons ausserhalb des runden 480x480-Displays liegen.
