@@ -20,7 +20,7 @@ Linux, macOS oder Windows mit WSL, sowie:
 tools/sim/build.sh
 ```
 
-Beim ersten Start wird LVGL nach `tools/sim/build/lvgl` geklont und einmalig gebaut
+Beim ersten Start wird LVGL nach `tools/sim/build/<Version>/lvgl` geklont und einmalig gebaut
 (dauert ein bis zwei Minuten). Danach geht jeder Durchlauf in wenigen Sekunden.
 
 Ausgabe:
