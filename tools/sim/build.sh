@@ -5,7 +5,7 @@ set -e
 SIM="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SIM/../.." && pwd)"
 LVGL_VER="${LVGL_VER:-v9.2.2}"
-B="$SIM/build"
+B="$SIM/build/$LVGL_VER"
 mkdir -p "$B"
 
 # 1) LVGL holen (einmalig)

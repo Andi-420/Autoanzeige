@@ -33,10 +33,10 @@ Seite boost:
 Seite accel:
   [accel] AUSSERHALB r=295  (10,410)-(32,424)  'V/Z:'     <- Beispiel für einen Fehler
 Gesamt ausserhalb: 0
-Bilder: tools/sim/build/out_*.png
+Bilder: tools/sim/build/v9.2.2/out_*.png
 ```
 
-Die Bilder liegen in `tools/sim/build/` (`out_main.png`, `out_boost.png`, ...).
+Die Bilder liegen in `tools/sim/build/<LVGL-Version>/` (`out_main.png`, `out_boost.png`, ...).
 Der Bereich außerhalb des runden Displays ist dunkelrot eingefärbt.
 Das Skript endet mit Fehlercode 1, wenn etwas außerhalb liegt.
 
@@ -52,4 +52,6 @@ Texte erzeugen, z. B. negative Zahlen oder vierstellige Drehzahlen.
   `stub/Arduino.h` (oder dem passenden Stub) ergänzt werden, sonst schlägt der Build fehl.
 - Der Simulator prüft nur die Oberfläche. OBD-Kommunikation, Touch und Sensoren
   laufen nicht (die Stubs liefern feste Werte).
-- Andere LVGL-Version: `LVGL_VER=v9.3.0 tools/sim/build.sh` (vorher `tools/sim/build/` löschen).
+- Andere LVGL-Version (am besten die, die in der Arduino IDE installiert ist):
+  `LVGL_VER=v9.1.0 tools/sim/build.sh`. Jede Version bekommt einen eigenen Ordner unter `build/`.
+  Getestet: v9.0.0, v9.1.0, v9.2.2.
