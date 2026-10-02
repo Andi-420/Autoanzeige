@@ -35,6 +35,7 @@
 #include "Display_ST7701.h"
 #include "Touch_CST820.h"
 #include "I2C_Driver.h"
+#include "OilScan.h"
 
 // ══════════════════════════════════════════════════════════════════
 // KONFIGURATION
@@ -52,7 +53,9 @@
 #define PAGE_BRIGHT 2
 #define PAGE_BOOST  3
 #define PAGE_ACCEL  4
-#define PAGE_COUNT  5
+#define PAGE_COUNT  5   // Seiten mit Wisch-Navigation (Punkte unten)
+#define PAGE_OILSCAN 5  // Oel-Suche: nur ueber Knopf auf der Ladedruckseite erreichbar
+#define PAGE_TOTAL  6
 
 #define C_BG      0x0A0A12
 #define C_SURFACE 0x12121E
@@ -77,7 +80,7 @@ static lv_color_t *draw_buf_1 = nullptr;
 static lv_color_t *draw_buf_2 = nullptr;
 static lv_display_t *display = nullptr;
 
-static lv_obj_t *screens[PAGE_COUNT];
+static lv_obj_t *screens[PAGE_TOTAL];
 static int curPage = PAGE_MAIN;
 
 // Mutex schützt alle gXxx-Variablen zwischen OBD-Task und LVGL-Task
@@ -108,6 +111,39 @@ static volatile bool gFetchDTC = false;   // gesetzt von LVGL-Task, gelesen von 
 #define DTC_DONE    2
 #define DTC_ERROR   3
 static int gDtcState = DTC_IDLE;  // unter Mutex
+
+// ── Oel-Suche (herstellerspezifische Oel-Temperatur per UDS Mode 22) ──
+// Ablauf: Kalt-Scan (alle DIDs durchprobieren, Treffer merken) -> warm fahren ->
+// Warm-Vergleich (Treffer erneut lesen, Kandidaten bestimmen) -> Live-Anzeige ->
+// Kandidat lang druecken = als Oel-Temperatur speichern (NVS).
+#define SCAN_IDLE      0
+#define SCAN_COLD      1   // Kalt-Scan laeuft
+#define SCAN_COLD_DONE 2   // Treffer vorhanden, wartet auf Warm-Vergleich
+#define SCAN_WARM      3   // Warm-Vergleich laeuft
+#define SCAN_LIVE      4   // Kandidaten werden live gelesen
+#define SCAN_ERROR     5
+
+#define SCMD_NONE      0   // Befehle LVGL-Task -> OBD-Task
+#define SCMD_COLD      1
+#define SCMD_COLD_FULL 2
+#define SCMD_WARM      3
+#define SCMD_ABORT     4
+static volatile int gScanCmd = SCMD_NONE;
+
+#define OIL_MAX_HITS  1200
+#define OIL_MAX_CANDS 5
+struct ScanStatus {                 // unter Mutex
+  int     phase;
+  int     hits;
+  char    msg[160];                 // fertiger Statustext fuer die Anzeige
+  int     nCand;
+  OilCand cand[OIL_MAX_CANDS];
+  float   candNow[OIL_MAX_CANDS];   // Live-Werte
+  bool    candNowOk[OIL_MAX_CANDS];
+};
+static ScanStatus gScan = { SCAN_IDLE, 0, "", 0 };
+static uint16_t gOilDid = 0;        // gespeicherte Oel-DID (0 = keine, Standard-PID 0x5C nutzen)
+static uint8_t  gOilFml = 0;        // Formel-Index (siehe OilScan.h), unter Mutex
 
 // Flag: neue Daten verfügbar → LVGL-Task soll Display updaten
 static volatile bool gNewData = false;
@@ -156,9 +192,10 @@ static void refresh_main(void);
 static void refresh_dtc_ui(void);
 static void refresh_boost(void);
 static void refresh_accel(void);
+static void refresh_oilscan(void);
 
 static void goto_page(int idx) {
-  if (idx < 0 || idx >= PAGE_COUNT) return;
+  if (idx < 0 || idx >= PAGE_TOTAL) return;
   curPage = idx;
   // Beim Betreten sofort mit aktuellen Werten fuellen (nicht erst beim naechsten OBD-Zyklus)
   switch (idx) {
@@ -166,6 +203,7 @@ static void goto_page(int idx) {
     case PAGE_BOOST: refresh_boost();  break;
     case PAGE_DTC:   refresh_dtc_ui(); break;
     case PAGE_ACCEL: refresh_accel();  break;
+    case PAGE_OILSCAN: refresh_oilscan(); break;
     default: break;
   }
   lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
@@ -273,6 +311,26 @@ static lv_obj_t* add_title(lv_obj_t *scr, const char *txt, uint32_t col) {
   lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
   lv_obj_align(l, LV_ALIGN_TOP_MID, 0, 38);
   return l;
+}
+
+// Umrandeter Knopf im Stil der Anzeige; Label ist Kind 0 des Knopfes
+static lv_obj_t* make_button(lv_obj_t *parent, int w, int h, uint32_t col,
+                             const char *txt, const lv_font_t *font) {
+  lv_obj_t *b = lv_button_create(parent);
+  lv_obj_set_size(b, w, h);
+  lv_obj_set_style_bg_color(b, lv_color_hex(0x1A1A3E), 0);
+  lv_obj_set_style_bg_color(b, lv_color_hex(0x2A2A5E), LV_STATE_PRESSED);
+  lv_obj_set_style_bg_color(b, lv_color_hex(0x15151F), LV_STATE_DISABLED);
+  lv_obj_set_style_border_color(b, lv_color_hex(col), 0);
+  lv_obj_set_style_border_width(b, 1, 0);
+  lv_obj_set_style_radius(b, h / 2, 0);
+  lv_obj_set_style_shadow_width(b, 0, 0);
+  lv_obj_t *l = lv_label_create(b);
+  lv_label_set_text(l, txt);
+  lv_obj_set_style_text_font(l, font, 0);
+  lv_obj_set_style_text_color(l, lv_color_hex(col), 0);
+  lv_obj_center(l);
+  return b;
 }
 
 static void add_nav_dots(lv_obj_t *scr, int active) {
@@ -718,6 +776,11 @@ static void build_page_boost(void) {
   lv_obj_set_style_text_color(lbl_boost_status, lv_color_hex(C_MUTED), 0);
   lv_obj_align(lbl_boost_status, LV_ALIGN_CENTER, 0, 100);
 
+  // Knopf zur Oel-Suche (fuer Autos ohne Standard-PID 0x5C, z.B. VAG)
+  lv_obj_t *bs = make_button(scr, 130, 32, C_MUTED, "OEL-SUCHE", &lv_font_montserrat_12);
+  lv_obj_align(bs, LV_ALIGN_CENTER, 0, 150);
+  lv_obj_add_event_cb(bs, [](lv_event_t*e){ goto_page(PAGE_OILSCAN); }, LV_EVENT_CLICKED, nullptr);
+
   add_nav_dots(scr, PAGE_BOOST);
 }
 
@@ -765,6 +828,155 @@ static void refresh_boost(void) {
   uint32_t oilCol = oil_temp_color(oil, oilOk);
   lv_obj_set_style_arc_color(oil_arc, lv_color_hex(oilCol), LV_PART_INDICATOR);
   lv_obj_set_style_text_color(lbl_oil_val, lv_color_hex(oilCol), 0);
+}
+
+// ══════════════════════════════════════════════════════════════════
+// OEL-SUCHE (Seite ohne Wisch-Navigation, Wischen = zurueck)
+// ══════════════════════════════════════════════════════════════════
+static lv_obj_t *os_status = nullptr;
+static lv_obj_t *os_btnA = nullptr;      // KALT-SCAN / ABBRECHEN
+static lv_obj_t *os_btnB = nullptr;      // WARM-VERGLEICH
+static lv_obj_t *os_cand[OIL_MAX_CANDS];
+static bool os_slot0_saved = false;      // Slot 0 zeigt die gespeicherte DID (zum Loeschen)
+
+static void oilscan_set_msg(const char *m) {
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  strncpy(gScan.msg, m, sizeof(gScan.msg) - 1);
+  gScan.msg[sizeof(gScan.msg) - 1] = 0;
+  xSemaphoreGive(dataMutex);
+}
+
+static void build_page_oilscan(void) {
+  lv_obj_t *scr = make_screen();
+  screens[PAGE_OILSCAN] = scr;
+  add_title(scr, "OEL-SUCHE", C_CYAN);
+
+  os_status = lv_label_create(scr);
+  lv_obj_set_width(os_status, 290);
+  lv_label_set_long_mode(os_status, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_text_align(os_status, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_text_font(os_status, &lv_font_montserrat_14, 0);
+  lv_obj_set_style_text_color(os_status, lv_color_hex(C_WHITE), 0);
+  lv_obj_align(os_status, LV_ALIGN_TOP_MID, 0, 76);
+
+  // Kandidaten-Liste (bis zu 5), lang druecken = speichern
+  for (int i = 0; i < OIL_MAX_CANDS; i++) {
+    lv_obj_t *b = make_button(scr, 320, 30, C_GREEN, "", &lv_font_montserrat_14);
+    lv_obj_align(b, LV_ALIGN_TOP_MID, 0, 150 + i * 35);
+    lv_obj_set_user_data(b, (void*)(intptr_t)i);
+    lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(b, [](lv_event_t *e){
+      int i = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
+      char m[96];
+      if (i == 0 && os_slot0_saved) {               // gespeicherte DID loeschen
+        xSemaphoreTake(dataMutex, portMAX_DELAY);
+        gOilDid = 0; gOilFml = 0;
+        xSemaphoreGive(dataMutex);
+        prefs.remove("oilDid"); prefs.remove("oilFml");
+        oilscan_set_msg("Gespeicherte DID geloescht.\nOel kommt wieder von PID 0x5C.");
+      } else {
+        xSemaphoreTake(dataMutex, portMAX_DELAY);
+        bool valid = i < gScan.nCand;
+        OilCand c = gScan.cand[valid ? i : 0];
+        if (valid) { gOilDid = c.did; gOilFml = c.fml; }
+        xSemaphoreGive(dataMutex);
+        if (!valid) return;
+        prefs.putUShort("oilDid", c.did);
+        prefs.putUChar("oilFml", c.fml);
+        snprintf(m, sizeof(m), "Gespeichert: DID %04X (%s).\nDie Oel-Kachel nutzt jetzt diesen Wert.",
+                 c.did, OIL_FML_NAME[c.fml]);
+        oilscan_set_msg(m);
+      }
+      refresh_oilscan();
+    }, LV_EVENT_LONG_PRESSED, nullptr);
+    os_cand[i] = b;
+  }
+
+  os_btnA = make_button(scr, 150, 40, C_CYAN, "KALT-SCAN", &lv_font_montserrat_14);
+  lv_obj_align(os_btnA, LV_ALIGN_CENTER, -80, 140);
+  // SHORT_CLICKED statt CLICKED: nach einem langen Druck kommt kein Klick hinterher
+  lv_obj_add_event_cb(os_btnA, [](lv_event_t *e){
+    int ph;
+    xSemaphoreTake(dataMutex, portMAX_DELAY);
+    ph = gScan.phase;
+    xSemaphoreGive(dataMutex);
+    if (ph == SCAN_COLD || ph == SCAN_WARM) gScanCmd = SCMD_ABORT;
+    else gScanCmd = SCMD_COLD;
+    oilscan_set_msg(ph == SCAN_COLD || ph == SCAN_WARM ? "Breche ab..." : "Starte Kalt-Scan...");
+    refresh_oilscan();
+  }, LV_EVENT_SHORT_CLICKED, nullptr);
+  lv_obj_add_event_cb(os_btnA, [](lv_event_t *e){
+    int ph;
+    xSemaphoreTake(dataMutex, portMAX_DELAY);
+    ph = gScan.phase;
+    xSemaphoreGive(dataMutex);
+    if (ph == SCAN_COLD || ph == SCAN_WARM) return;
+    gScanCmd = SCMD_COLD_FULL;
+    oilscan_set_msg("Starte Vollsuche (0000-FFFF, ca. 45 min)...");
+    refresh_oilscan();
+  }, LV_EVENT_LONG_PRESSED, nullptr);
+
+  os_btnB = make_button(scr, 150, 40, C_ORANGE, "WARM-VERGL.", &lv_font_montserrat_14);
+  lv_obj_align(os_btnB, LV_ALIGN_CENTER, 80, 140);
+  lv_obj_add_event_cb(os_btnB, [](lv_event_t *e){
+    gScanCmd = SCMD_WARM;
+    oilscan_set_msg("Starte Warm-Vergleich...");
+    refresh_oilscan();
+  }, LV_EVENT_CLICKED, nullptr);
+}
+
+static void refresh_oilscan(void) {
+  if (!os_status) return;
+  ScanStatus st;
+  uint16_t did; uint8_t fml;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  st = gScan;
+  did = gOilDid; fml = gOilFml;
+  xSemaphoreGive(dataMutex);
+
+  if (st.msg[0]) {
+    lv_label_set_text(os_status, st.msg);
+  } else {
+    lv_label_set_text(os_status,
+      "Motor KALT starten, Auto steht.\nKALT-SCAN antippen (ca. 6 min).\n"
+      "Lang druecken = Vollsuche (45 min).");
+  }
+  lv_obj_set_style_text_color(os_status,
+    lv_color_hex(st.phase == SCAN_ERROR ? C_RED : C_WHITE), 0);
+
+  bool running = st.phase == SCAN_COLD || st.phase == SCAN_WARM;
+  lv_label_set_text(lv_obj_get_child(os_btnA, 0), running ? "ABBRECHEN" : "KALT-SCAN");
+  bool warmOk = !running && st.hits > 0 &&
+                (st.phase == SCAN_COLD_DONE || st.phase == SCAN_LIVE);
+  if (warmOk) lv_obj_remove_state(os_btnB, LV_STATE_DISABLED);
+  else        lv_obj_add_state(os_btnB, LV_STATE_DISABLED);
+
+  // Kandidaten bzw. gespeicherte DID
+  os_slot0_saved = false;
+  char buf[80];
+  for (int i = 0; i < OIL_MAX_CANDS; i++) {
+    lv_obj_t *b = os_cand[i];
+    lv_obj_t *l = lv_obj_get_child(b, 0);
+    if (i < st.nCand && !running) {
+      const OilCand &c = st.cand[i];
+      char now[12] = "--";
+      if (st.candNowOk[i]) snprintf(now, sizeof(now), "%d", (int)lroundf(st.candNow[i]));
+      snprintf(buf, sizeof(buf), "%s%04X %s  %d>%d  jetzt %s%s",
+               (c.did == did && c.fml == fml) ? "* " : "", c.did, OIL_FML_NAME[c.fml],
+               (int)lroundf(c.cold), (int)lroundf(c.warm), now, c.likeCoolant ? " =KW" : "");
+      lv_label_set_text(l, buf);
+      lv_obj_set_style_text_color(l, lv_color_hex(c.likeCoolant ? C_MUTED : C_GREEN), 0);
+      lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
+    } else if (i == 0 && did && !running && st.nCand == 0) {
+      os_slot0_saved = true;
+      snprintf(buf, sizeof(buf), "Gespeichert: %04X (%s) - lang = loeschen", did, OIL_FML_NAME[fml]);
+      lv_label_set_text(l, buf);
+      lv_obj_set_style_text_color(l, lv_color_hex(C_YELLOW), 0);
+      lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
+    } else {
+      lv_obj_add_flag(b, LV_OBJ_FLAG_HIDDEN);
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1041,7 +1253,17 @@ static bool elmParseOBD(const String &resp, const char *tag,
   return false;
 }
 
+// CAN-Adressierung: 7DF = Rundruf an alle Steuergeraete (Standard),
+// 7E0 = direkt an das Motorsteuergeraet (noetig fuer Mode 22 / UDS)
+static bool sHdrPhys = false;
+static void elmHeader(bool phys) {
+  if (!gIsCan || phys == sHdrPhys) return;
+  elmSendCmd(phys ? "ATSH7E0" : "ATSH7DF", 1000);
+  sHdrPhys = phys;
+}
+
 static void elmInit(void) {
+  sHdrPhys = false;   // ATZ setzt den Header zurueck
   String ver = elmSendCmd("ATZ", 3000);
   if (!ver.length()) {
     Serial.println("[ELM] keine Antwort");
@@ -1162,7 +1384,10 @@ static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
 }
 
 static void elmFetchDTC(void) {
+  bool wasPhys = sHdrPhys;
+  elmHeader(false);   // Fehlercodes aller Steuergeraete (Rundruf)
   String resp = elmSendCmd("03", 5000);
+  elmHeader(wasPhys);
   char codes[DTC_MAX][6];
   int n = resp.length() ? dtc_parse(resp.c_str(), gIsCan, codes, DTC_MAX) : -1;
   Serial.printf("[DTC] Antwort '%s' -> %d\n", resp.c_str(), n);
@@ -1199,6 +1424,184 @@ static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
   return false;
 }
 
+// ══════════════════════════════════════════════════════════════════
+// OEL-SUCHE (laeuft im OBD-Task, normale Anzeige ist solange pausiert)
+// ══════════════════════════════════════════════════════════════════
+static OilHit sHits[OIL_MAX_HITS];  // nur OBD-Task (und setup vor Task-Start)
+static int    sHitCount = 0;
+static float  sCoolCold = 0;        // Kuehlwasser beim Kalt-Scan
+
+// Messwert per UDS Mode 22 lesen (Header muss auf 7E0 stehen)
+static int udsRead(uint16_t did, uint8_t *out, int maxOut, uint8_t *nrc, uint32_t ms = 1000) {
+  char cmd[8];
+  snprintf(cmd, sizeof(cmd), "22%04X", did);
+  String r = elmSendCmd(cmd, ms);
+  if (r.length() == 0) {
+    if (sElmSilent < 255) sElmSilent++;
+    return UDS_NONE;
+  }
+  sElmSilent = 0;
+  return uds_parse(r.c_str(), did, out, maxOut, nrc);
+}
+
+static void scanStatus(int phase, const char *fmt, ...) {
+  char buf[160];
+  va_list ap; va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  gScan.phase = phase;
+  gScan.hits = sHitCount;
+  strncpy(gScan.msg, buf, sizeof(gScan.msg) - 1);
+  gScan.msg[sizeof(gScan.msg) - 1] = 0;
+  xSemaphoreGive(dataMutex);
+}
+
+static bool readCoolant(float &c) {
+  uint8_t a, b;
+  if (!obdQuery("0105", "4105", a, b)) return false;
+  c = (float)a - 40;
+  return true;
+}
+
+// Nach dem Scan wieder normale Adressierung (7E0 nur, wenn eine Oel-DID gespeichert ist)
+static void scanRestoreHeader(void) {
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  bool phys = gOilDid != 0;
+  xSemaphoreGive(dataMutex);
+  elmHeader(phys);
+}
+
+// Schritt 1: alle DIDs im Bereich abfragen, positive Antworten merken
+static void oilScanCold(bool full) {
+  if (!gIsCan) { scanStatus(SCAN_ERROR, "Oel-Suche geht nur bei CAN-Fahrzeugen."); return; }
+  elmHeader(true);
+  sHitCount = 0;
+  const uint32_t lo = full ? 0x0000 : 0x1000, hi = full ? 0xFFFF : 0x2FFF;
+  const uint32_t total = hi - lo + 1, t0 = millis();
+  int silent = 0, nrc11 = 0;
+  scanStatus(SCAN_COLD, "Kalt-Scan startet...");
+  Serial.printf("[SCAN] Kalt-Scan %04X-%04X\n", (unsigned)lo, (unsigned)hi);
+
+  for (uint32_t did = lo; did <= hi; did++) {
+    if (gScanCmd == SCMD_ABORT) {
+      gScanCmd = SCMD_NONE;
+      sHitCount = 0;
+      scanRestoreHeader();
+      scanStatus(SCAN_IDLE, "Abgebrochen.");
+      return;
+    }
+    uint8_t d[8] = {0}, nrc = 0;
+    int n = udsRead((uint16_t)did, d, sizeof(d), &nrc);
+    if (n >= 0) {
+      silent = 0;
+      if (sHitCount < OIL_MAX_HITS) {
+        OilHit &h = sHits[sHitCount++];
+        h.did = (uint16_t)did; h.len = (uint8_t)n;
+        h.cold[0] = n > 0 ? d[0] : 0; h.cold[1] = n > 1 ? d[1] : 0;
+        h.warmOk = false;
+      }
+      Serial.printf("[SCAN] %04X: %d Byte(s) %02X %02X\n", (unsigned)did, n, d[0], n > 1 ? d[1] : 0);
+    } else if (n == UDS_NEG) {
+      silent = 0;
+      if (nrc == 0x11) nrc11++;   // serviceNotSupported
+    } else {
+      silent++;
+    }
+    if (silent >= 20) {
+      scanRestoreHeader();
+      scanStatus(SCAN_ERROR, "Motorsteuergeraet antwortet nicht.\nZuendung an / Motor laeuft?");
+      return;
+    }
+    if (nrc11 >= 20 && sHitCount == 0) {
+      scanRestoreHeader();
+      scanStatus(SCAN_ERROR, "Steuergeraet unterstuetzt Mode 22 nicht.");
+      return;
+    }
+    uint32_t done = did - lo + 1;
+    if ((done & 0x1F) == 0) {
+      uint32_t el = millis() - t0;
+      uint32_t restMin = (uint32_t)((uint64_t)el * (total - done) / done / 60000UL) + 1;
+      scanStatus(SCAN_COLD, "Kalt-Scan: %04X  (%u%%)\n%d Treffer, noch ca. %u min\nAnzeige ist solange pausiert",
+                 (unsigned)did, (unsigned)(done * 100 / total), sHitCount, (unsigned)restMin);
+    }
+  }
+
+  sCoolCold = 0;
+  readCoolant(sCoolCold);
+  // Treffer speichern, damit der Warm-Vergleich auch nach Zuendung aus/an klappt
+  prefs.putBytes("scanHits", sHits, sHitCount * sizeof(OilHit));
+  prefs.putFloat("scanCool", sCoolCold);
+  scanRestoreHeader();
+  scanStatus(SCAN_COLD_DONE, "Kalt-Scan fertig: %d Treffer (KW %d C).\nWarm fahren, dann anhalten und\nWARM-VERGLEICH antippen.",
+             sHitCount, (int)sCoolCold);
+  Serial.printf("[SCAN] fertig, %d Treffer, KW %.0f C\n", sHitCount, sCoolCold);
+}
+
+// Schritt 2: Treffer warm erneut lesen und Kandidaten bestimmen
+static void oilScanWarm(void) {
+  if (sHitCount == 0) { scanStatus(SCAN_ERROR, "Keine Treffer vom Kalt-Scan."); return; }
+  elmHeader(true);
+  float coolWarm = 0;
+  readCoolant(coolWarm);
+  for (int i = 0; i < sHitCount; i++) {
+    if (gScanCmd == SCMD_ABORT) {
+      gScanCmd = SCMD_NONE;
+      scanRestoreHeader();
+      scanStatus(SCAN_COLD_DONE, "Abgebrochen. Treffer vom Kalt-Scan\nbleiben erhalten.");
+      return;
+    }
+    uint8_t d[8] = {0}, nrc = 0;
+    int n = udsRead(sHits[i].did, d, sizeof(d), &nrc);
+    sHits[i].warmOk = (n == sHits[i].len);
+    sHits[i].warm[0] = n > 0 ? d[0] : 0;
+    sHits[i].warm[1] = n > 1 ? d[1] : 0;
+    if ((i & 0x07) == 0)
+      scanStatus(SCAN_WARM, "Warm-Vergleich: %d / %d", i, sHitCount);
+  }
+
+  OilCand c[OIL_MAX_CANDS];
+  int nc = oil_scan_eval(sHits, sHitCount, sCoolCold, coolWarm, c, OIL_MAX_CANDS);
+  for (int i = 0; i < nc; i++)
+    Serial.printf("[SCAN] Kandidat %04X %s: %.1f -> %.1f C%s\n", c[i].did, OIL_FML_NAME[c[i].fml],
+                  c[i].cold, c[i].warm, c[i].likeCoolant ? " (wie Kuehlwasser)" : "");
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  gScan.nCand = nc;
+  for (int i = 0; i < nc; i++) { gScan.cand[i] = c[i]; gScan.candNowOk[i] = false; }
+  xSemaphoreGive(dataMutex);
+
+  scanRestoreHeader();
+  if (nc == 0)
+    scanStatus(SCAN_COLD_DONE, "Kein Kandidat gefunden (KW %d -> %d C).\nMotor richtig warm? Sonst nochmal,\noder Vollsuche (KALT-SCAN lang).",
+               (int)sCoolCold, (int)coolWarm);
+  else
+    scanStatus(SCAN_LIVE, "%d Kandidat(en), KW kalt %d / warm %d C.\nOel ist warm meist etwas ueber KW.\nKandidat LANG druecken = speichern.",
+               nc, (int)sCoolCold, (int)coolWarm);
+}
+
+// Schritt 3: Kandidaten live lesen (nur solange die Such-Seite offen ist)
+static void oilScanLive(void) {
+  OilCand c[OIL_MAX_CANDS];
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  int nc = gScan.nCand;
+  for (int i = 0; i < nc; i++) c[i] = gScan.cand[i];
+  xSemaphoreGive(dataMutex);
+
+  elmHeader(true);
+  float now[OIL_MAX_CANDS]; bool ok[OIL_MAX_CANDS];
+  for (int i = 0; i < nc; i++) {
+    uint8_t d[8] = {0}, nrc = 0;
+    int n = udsRead(c[i].did, d, sizeof(d), &nrc);
+    ok[i] = n >= 0 && oil_fml_eval(c[i].fml, d, n, &now[i]);
+  }
+  float cool;
+  bool coolOk = readCoolant(cool);
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  for (int i = 0; i < nc; i++) { gScan.candNow[i] = now[i]; gScan.candNowOk[i] = ok[i]; }
+  if (coolOk) gCoolant = (int)cool;
+  xSemaphoreGive(dataMutex);
+}
+
 #define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel
 #define AMB_MS       10000UL   // Umgebungsdruck
 #define OIL_MAX_FAIL  5
@@ -1224,12 +1627,41 @@ static void obdTask(void *param) {
     xSemaphoreGive(dataMutex);
 
     if (!ok) {
+      if (gScanCmd != SCMD_NONE) {
+        gScanCmd = SCMD_NONE;
+        scanStatus(SCAN_ERROR, "ELM327 nicht verbunden.");
+      }
       delay(5000);
       elmInit();
       sElmSilent = 0;
       sEcuFail = 0;
       continue;
     }
+
+    // ── Oel-Suche: Befehle von der Such-Seite ─────────────────────
+    int scmd = gScanCmd;
+    if (scmd == SCMD_COLD || scmd == SCMD_COLD_FULL) {
+      gScanCmd = SCMD_NONE;
+      oilScanCold(scmd == SCMD_COLD_FULL);
+      continue;
+    }
+    if (scmd == SCMD_WARM) {
+      gScanCmd = SCMD_NONE;
+      oilScanWarm();
+      continue;
+    }
+    if (scmd == SCMD_ABORT) gScanCmd = SCMD_NONE;   // es lief nichts
+
+    int sphase;
+    xSemaphoreTake(dataMutex, portMAX_DELAY);
+    sphase = gScan.phase;
+    xSemaphoreGive(dataMutex);
+    if (sphase == SCAN_LIVE && curPage == PAGE_OILSCAN) {
+      oilScanLive();
+      delay(200);
+      continue;
+    }
+    scanRestoreHeader();
 
     uint8_t a=0, b=0;
     float batt = gBatt;
@@ -1270,8 +1702,23 @@ static void obdTask(void *param) {
       // Oel-Temperatur (PID 0x5C): viele Autos kennen diese PID nicht und
       // antworten jedes Mal mit NO DATA. Nach OIL_MAX_FAIL Fehlversuchen
       // nur noch alle OIL_RETRY_MS erneut probieren (keine Dauersperre).
+      uint16_t oilDid; uint8_t oilFml;
+      xSemaphoreTake(dataMutex, portMAX_DELAY);
+      oilDid = gOilDid; oilFml = gOilFml;
+      xSemaphoreGive(dataMutex);
       bool oilDue = (oilFail < OIL_MAX_FAIL) || (now - tOilRetry >= OIL_RETRY_MS);
-      if (oilDue) {
+      if (oilDid) {
+        // Herstellerspezifisch (per Oel-Suche ermittelt), Header steht auf 7E0
+        uint8_t d[8] = {0}, nrc = 0;
+        float t;
+        int n = udsRead(oilDid, d, sizeof(d), &nrc);
+        if (n >= 0 && oil_fml_eval(oilFml, d, n, &t)) {
+          oil = (int)lroundf(t);
+          oilOk = true;
+        } else {
+          oilOk = false;
+        }
+      } else if (oilDue) {
         if (obdQuery("015C", "415C", a, b)) {
           oil = (int)a - 40;
           oilOk = true;
@@ -1390,6 +1837,23 @@ void setup() {
   Set_Backlight(gBrightness);
   gOffLong = prefs.getFloat("offLong", 0.0f);
   gOffLat  = prefs.getFloat("offLat", 0.0f);
+  gOilDid  = prefs.getUShort("oilDid", 0);
+  gOilFml  = prefs.getUChar("oilFml", 0);
+  if (gOilFml >= OIL_FML_COUNT) { gOilDid = 0; gOilFml = 0; }
+  // Treffer eines frueheren Kalt-Scans (Warm-Vergleich auch nach Neustart moeglich)
+  {
+    size_t len = prefs.getBytesLength("scanHits");
+    if (len > 0 && len % sizeof(OilHit) == 0 && len <= sizeof(sHits)) {
+      prefs.getBytes("scanHits", sHits, len);
+      sHitCount = len / sizeof(OilHit);
+      sCoolCold = prefs.getFloat("scanCool", 0.0f);
+      gScan.phase = SCAN_COLD_DONE;
+      gScan.hits = sHitCount;
+      snprintf(gScan.msg, sizeof(gScan.msg),
+               "Kalt-Scan vorhanden: %d Treffer (KW %d C).\nMotor warm? Dann WARM-VERGLEICH.",
+               sHitCount, (int)sCoolCold);
+    }
+  }
   Serial.println("[LCD] OK");
 
   pinMode(CST820_INT_PIN, INPUT_PULLUP);
@@ -1418,6 +1882,7 @@ void setup() {
   build_page_brightness();
   build_page_boost();
   build_page_accel();
+  build_page_oilscan();
 
   lv_screen_load(screens[PAGE_MAIN]);
   lv_task_handler();
@@ -1452,6 +1917,12 @@ void loop() {
   if (newData) {
     if (curPage == PAGE_MAIN) refresh_main();
     if (curPage == PAGE_BOOST) refresh_boost();
+  }
+
+  static uint32_t lastScanUi = 0;
+  if (curPage == PAGE_OILSCAN && millis() - lastScanUi >= 250) {
+    refresh_oilscan();
+    lastScanUi = millis();
   }
 
   bool newDTC = false;
