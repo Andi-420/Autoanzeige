@@ -17,6 +17,7 @@ uint32_t millis();
 inline void delay(uint32_t){}
 inline bool psramFound(){return true;}
 inline void* heap_caps_malloc(size_t n,int){return malloc(n);}
+inline void* heap_caps_calloc(size_t n,size_t sz,int){return calloc(n,sz);}
 inline void pinMode(int,int){}
 inline int digitalPinToInterrupt(int p){return p;}
 inline void attachInterrupt(int,void(*)(),int){}

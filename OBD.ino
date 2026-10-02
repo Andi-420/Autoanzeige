@@ -1427,7 +1427,9 @@ static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
 // ══════════════════════════════════════════════════════════════════
 // OEL-SUCHE (laeuft im OBD-Task, normale Anzeige ist solange pausiert)
 // ══════════════════════════════════════════════════════════════════
-static OilHit sHits[OIL_MAX_HITS];  // nur OBD-Task (und setup vor Task-Start)
+// Trefferliste liegt im PSRAM (ca. 10 KB) - der interne RAM (DRAM) ist knapp.
+// Wird in setup() angelegt; nur OBD-Task (und setup vor Task-Start) greift zu.
+static OilHit *sHits = nullptr;
 static int    sHitCount = 0;
 static float  sCoolCold = 0;        // Kuehlwasser beim Kalt-Scan
 
@@ -1475,6 +1477,7 @@ static void scanRestoreHeader(void) {
 // Schritt 1: alle DIDs im Bereich abfragen, positive Antworten merken
 static void oilScanCold(bool full) {
   if (!gIsCan) { scanStatus(SCAN_ERROR, "Oel-Suche geht nur bei CAN-Fahrzeugen."); return; }
+  if (!sHits) { scanStatus(SCAN_ERROR, "Kein Speicher fuer die Trefferliste (PSRAM)."); return; }
   elmHeader(true);
   sHitCount = 0;
   const uint32_t lo = full ? 0x0000 : 0x1000, hi = full ? 0xFFFF : 0x2FFF;
@@ -1843,7 +1846,8 @@ void setup() {
   // Treffer eines frueheren Kalt-Scans (Warm-Vergleich auch nach Neustart moeglich)
   {
     size_t len = prefs.getBytesLength("scanHits");
-    if (len > 0 && len % sizeof(OilHit) == 0 && len <= sizeof(sHits)) {
+    sHits = (OilHit*)heap_caps_calloc(OIL_MAX_HITS, sizeof(OilHit), MALLOC_CAP_SPIRAM);
+    if (sHits && len > 0 && len % sizeof(OilHit) == 0 && len <= OIL_MAX_HITS * sizeof(OilHit)) {
       prefs.getBytes("scanHits", sHits, len);
       sHitCount = len / sizeof(OilHit);
       sCoolCold = prefs.getFloat("scanCool", 0.0f);
