@@ -39,7 +39,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | Seite | Inhalt |
 |---|---|
 | **Hauptseite** | Batteriespannung, Öltemperatur, Kühlwasser, Drehzahl. In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht) |
-| **Ladedruck / Öl** | Ladedruck = Saugrohrdruck (PID 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,5 … +1,5 bar. Innerer Bogen: Öltemperatur. Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
+| **Ladedruck / Öl** | Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Innerer Bogen: Öltemperatur. **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
 | **Fehlercodes** | „AUSLESEN“ tippen, dann werden die gespeicherten Fehlercodes (Mode 03) angezeigt, z. B. `P0123` |
 | **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten |
 | **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** löscht die Max-Werte. **RESET lange drücken** (Auto steht still) setzt den Nullpunkt, um einen schrägen Einbau auszugleichen. Der Nullpunkt wird gespeichert |
@@ -49,7 +49,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | Wert | Befehl / PID | Intervall |
 |---|---|---|
 | Drehzahl | 010C | jeder Zyklus |
-| Saugrohrdruck (MAP) | 010B | jeder Zyklus |
+| Saugrohrdruck (MAP) | 0187 (1/32 kPa, bis 2048 kPa), falls das Auto es kennt; sonst 010B (1 Byte, max. 255 kPa ≈ +1,55 bar Ladedruck) | jeder Zyklus |
 | Batteriespannung | ATRV (misst der ELM327 selbst) | 1 s |
 | Kühlwasser | 0105 | 1 s |
 | Öltemperatur | `2211BD` an das Motorsteuergerät (7E0), Formel (A·256+B)/10 − 273,1 (Kelvin/10). Fest eingebaut; eine per Öl-Suche gespeicherte andere DID hat Vorrang | 1 s |

@@ -104,6 +104,8 @@ static bool gEcuOK = false;       // Steuergeraet antwortet (Zuendung an)
 static bool gOilOK = false;     // bis zur ersten gueltigen Antwort "N/A" anzeigen
 static bool gIsCan = true;        // Protokoll (nur im OBD-Task benutzt), per ATDPN ermittelt
 static bool sProtoKnown = false;  // erst true, wenn ATDPN ein echtes Protokoll meldet
+static bool sMapProbed = false;   // PID-0x87-Unterstuetzung schon geprueft?
+static bool sMap87 = false;       // Saugrohrdruck ueber PID 0x87 statt 0x0B
 static volatile bool gFetchDTC = false;   // gesetzt von LVGL-Task, gelesen von OBD-Task
 
 // DTC-Lesestatus fuer die Anzeige
@@ -687,9 +689,25 @@ static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_boost_status = nullptr;
 
+// ── Schaltblitz (wie im Rennsport): roter Ring am Displayrand blinkt ab SHIFT_RPM ──
+#define SHIFT_RPM       3500
+#define SHIFT_BLINK_MS  100    // Umschaltintervall -> 5x pro Sekunde an/aus
+static lv_obj_t *shift_ring = nullptr;
+static bool shiftActive = false;   // nur im LVGL-Task benutzt
+
+static void shift_blink_cb(lv_timer_t *t) {
+  if (!shift_ring) return;
+  if (shiftActive && curPage == PAGE_BOOST) {
+    if (lv_obj_has_flag(shift_ring, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+    else                                                 lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+  } else if (!lv_obj_has_flag(shift_ring, LV_OBJ_FLAG_HIDDEN)) {
+    lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 // Skalierung: bar -> Arc-Wert in "Centibar" (int), damit lv_arc mit 0.01-bar-Aufloesung arbeiten kann
-#define BOOST_ARC_MIN (-50)   // -0.5 bar
-#define BOOST_ARC_MAX  150    // +1.5 bar
+#define BOOST_ARC_MIN (-60)   // -0.6 bar
+#define BOOST_ARC_MAX  200    // +2.0 bar
 #define OIL_ARC_MIN   (-20)   // Grad C
 #define OIL_ARC_MAX    150    // Grad C
 
@@ -781,6 +799,20 @@ static void build_page_boost(void) {
   lv_obj_set_style_text_color(lbl_boost_status, lv_color_hex(C_MUTED), 0);
   lv_obj_align(lbl_boost_status, LV_ALIGN_CENTER, 0, 100);
 
+  // Schaltblitz-Ring ganz aussen (Radius ca. 223..235 px), liegt ausserhalb aller Anzeigen
+  shift_ring = lv_arc_create(scr);
+  lv_obj_set_size(shift_ring, 470, 470);
+  lv_obj_center(shift_ring);
+  lv_arc_set_bg_angles(shift_ring, 0, 360);
+  lv_obj_set_style_arc_color(shift_ring, lv_color_hex(C_RED), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(shift_ring, 12, LV_PART_MAIN);
+  lv_obj_set_style_arc_opa(shift_ring, LV_OPA_TRANSP, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(shift_ring, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_remove_style(shift_ring, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(shift_ring, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+  lv_timer_create(shift_blink_cb, SHIFT_BLINK_MS, nullptr);
+
   // Knopf zur Oel-Suche (fuer Autos ohne Standard-PID 0x5C, z.B. VAG)
   lv_obj_t *bs = make_button(scr, 130, 32, C_MUTED, "OEL-SUCHE", &lv_font_montserrat_12);
   lv_obj_align(bs, LV_ALIGN_CENTER, 0, 150);
@@ -791,13 +823,16 @@ static void build_page_boost(void) {
 
 static void refresh_boost(void) {
   float boostBar;
-  int oil;
+  int oil, rpm;
   bool oilOk;
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   boostBar = gBoostBar;
   oil = gOilTemp;
   oilOk = gOilOK;
+  rpm = gRPM;
   xSemaphoreGive(dataMutex);
+
+  shiftActive = rpm >= SHIFT_RPM;   // Blinken selbst macht shift_blink_cb
 
   // ── Ladedruck-Arc + Label ───────────────────────────────────
   char buf[16];
@@ -1262,6 +1297,23 @@ static bool elmParseOBD(const String &resp, const char *tag,
   return false;
 }
 
+// Wie elmParseOBD, aber beliebig viele Datenbytes (z.B. PID 0x87 mit 5 Bytes).
+// Rueckgabe: Anzahl gelesener Bytes (0 = Tag nicht gefunden)
+static int elmParseOBDBytes(const String &resp, const char *tag, uint8_t *out, int maxN) {
+  String r = resp;
+  r.replace(" ", ""); r.replace("\n", "");
+  int idx = r.indexOf(tag);
+  if (idx < 0) return 0;
+  const char *p = r.c_str() + idx + strlen(tag);
+  int n = 0;
+  while (n < maxN && isHexadecimalDigit(p[0]) && isHexadecimalDigit(p[1])) {
+    char h[3] = { p[0], p[1], 0 };
+    out[n++] = (uint8_t)strtol(h, nullptr, 16);
+    p += 2;
+  }
+  return n;
+}
+
 // CAN-Adressierung: 7DF = Rundruf an alle Steuergeraete (Standard),
 // 7E0 = direkt an das Motorsteuergeraet (noetig fuer Mode 22 / UDS)
 static bool sHdrPhys = false;
@@ -1290,6 +1342,7 @@ static void elmDetectProto(void) {
 static void elmInit(void) {
   sHdrPhys = false;   // ATZ setzt den Header zurueck
   sProtoKnown = false;
+  sMapProbed = false;
   String ver = elmSendCmd("ATZ", 3000);
   if (!ver.length()) {
     Serial.println("[ELM] keine Antwort");
@@ -1627,6 +1680,37 @@ static void oilScanLive(void) {
   xSemaphoreGive(dataMutex);
 }
 
+// ── Saugrohrdruck: PID 0x0B hat nur 1 Byte (max. 255 kPa = ca. +1,55 bar Ladedruck).
+// PID 0x87 liefert ihn in 1/32 kPa bis 2048 kPa. Wird genutzt, wenn das Auto ihn kennt.
+
+static int obdQueryBytes(const char *cmd, const char *tag, uint8_t *out, int maxN) {
+  String r = elmSendCmd(cmd, 2500);
+  if (r.length() == 0) { if (sElmSilent < 255) sElmSilent++; return 0; }
+  sElmSilent = 0;
+  int n = elmParseOBDBytes(r, tag, out, maxN);
+  if (n > 0) sEcuFail = 0;
+  return n;
+}
+
+static bool readMap87(float &kpa) {
+  uint8_t e[5];
+  int n = obdQueryBytes("0187", "4187", e, 5);
+  if (n < 3 || !(e[0] & 0x01)) return false;      // Bit 0 = Sensor A vorhanden
+  kpa = ((e[1] << 8) | e[2]) / 32.0f;
+  return true;
+}
+
+static void probeMap87(void) {
+  sMapProbed = true;
+  uint8_t d[4];
+  // Unterstuetzte PIDs 0x81..0xA0: Byte 0, Bit 1 = PID 0x87
+  if (obdQueryBytes("0180", "4180", d, 4) >= 1 && (d[0] & 0x02)) {
+    float k;
+    sMap87 = readMap87(k);
+  }
+  Serial.printf("[MAP] PID 0x87 %s\n", sMap87 ? "wird genutzt (bis 2048 kPa)" : "nicht verfuegbar, nutze 0x0B (max 255 kPa)");
+}
+
 #define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel
 #define AMB_MS       10000UL   // Umgebungsdruck
 #define OIL_MAX_FAIL  5
@@ -1712,7 +1796,11 @@ static void obdTask(void *param) {
     }
 
     // Ladedruck: MAP (Drosselklappendruck, PID 0x0B) minus Umgebungsdruck (PID 0x33)
-    if (obdQuery("010B", "410B", a, b))
+    if (sProtoKnown && !sMapProbed) probeMap87();
+    float k87;
+    if (sMap87 && readMap87(k87))
+      mapKPa = k87;
+    else if (obdQuery("010B", "410B", a, b))
       mapKPa = (float)a; // PID 0x0B liefert Druck direkt in kPa (0-255)
 
     // ── Langsame Werte: ca. 1x pro Sekunde ─────────────────────────
@@ -1770,8 +1858,8 @@ static void obdTask(void *param) {
     }
 
     boostBar = (mapKPa - ambKPa) / 100.0f; // kPa -> bar
-    if (boostBar < -0.5f) boostBar = -0.5f;
-    if (boostBar > 1.5f)  boostBar = 1.5f;
+    if (boostBar < -0.6f) boostBar = -0.6f;
+    if (boostBar > 2.0f)  boostBar = 2.0f;
 
     // ── Verbindungsstatus ─────────────────────────────────────────
     bool elmOk = sElmSilent < 3;          // 3x gar keine Antwort => Adapter weg
