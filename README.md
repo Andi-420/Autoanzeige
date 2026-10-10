@@ -52,21 +52,22 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | Saugrohrdruck (MAP) | 010B | jeder Zyklus |
 | Batteriespannung | ATRV (misst der ELM327 selbst) | 1 s |
 | Kühlwasser | 0105 | 1 s |
-| Öltemperatur | gespeicherte VAG-DID per `22xxxx` (aus der Öl-Suche), sonst 015C | 1 s; 015C nach 5 Fehlversuchen nur noch alle 30 s |
+| Öltemperatur | `2211BD` an das Motorsteuergerät (7E0), Formel (A·256+B)/10 − 273,1 (Kelvin/10). Fest eingebaut; eine per Öl-Suche gespeicherte andere DID hat Vorrang | 1 s |
 | Umgebungsdruck | 0133 | 10 s (Startwert 101,3 kPa, bis der erste Messwert da ist) |
 
 ### Hinweise zum Fabia 3 / 1.0 TSI
 
-- Skoda/VW liefert die **Öltemperatur** über die Standard-PID 0x5C nicht (beim Fabia bestätigt: auch ScanMaster findet sie nicht). Ohne gespeicherte DID zeigt die Kachel `N/A`, und die Abfrage wird automatisch seltener wiederholt. Abhilfe: die **Öl-Suche**.
+- Skoda/VW liefert die **Öltemperatur** nicht über die Standard-PID 0x5C. Beim Fabia steckt sie im Motorsteuergerät unter **DID `11BD`** (Kelvin/10), per Öl-Suche gefunden. Dieser Wert ist fest eingebaut.
 - Laut ScanMaster: ISO 15765-4 CAN 11 Bit / 500 kbit, Motorsteuergerät antwortet auf `7E8` (angefragt über `7E0`).
-- Das Protokoll wird beim Start automatisch erkannt (`ATSP0`, dann `ATDPN`). Beim Fabia sollte CAN erkannt werden. Die Fehlercode-Auswertung kann auch Antworten verarbeiten, die über mehrere CAN-Frames verteilt kommen.
+- Das Protokoll wird automatisch erkannt (`ATSP0`, dann `ATDPN`). Startet die Anzeige vor der Zündung, ist es zunächst unbekannt und wird nachgeholt, sobald das Auto antwortet. Erst dann wird auf `7E0` umgeschaltet (vorher blieb die Öltemperatur in diesem Fall bis zum Neustart auf `N/A`). Die Fehlercode-Auswertung kann auch Antworten verarbeiten, die über mehrere CAN-Frames verteilt kommen.
 - Wenn der Adapter nicht mehr antwortet (3 leere Antworten hintereinander), wird er automatisch neu initialisiert.
 
 ## Öl-Suche (herstellerspezifische Öltemperatur)
 
 Das Motorsteuergerät kennt die Öltemperatur, aber nur unter einer herstellerspezifischen
 Kennnummer (DID), abfragbar mit UDS Mode 22 (`22 xxxx`). Eine öffentliche Liste gibt es nicht,
-deshalb sucht das Programm sie selbst. **Mode 22 liest nur**, am Steuergerät wird nichts verändert.
+deshalb kann das Programm sie selbst suchen. **Für den Fabia ist das schon erledigt: `11BD` ist fest eingebaut.**
+Die Suche ist nur noch für andere Autos oder zur Kontrolle nötig. **Mode 22 liest nur**, am Steuergerät wird nichts verändert.
 
 1. **Kalt-Scan:** Motor kalt starten, Auto steht. Ladedruckseite → **OEL-SUCHE** → **KALT-SCAN**.
    Fragt die DIDs `1000–2FFF` ab (ca. 5–7 min) und merkt sich alle, die antworten.
@@ -79,11 +80,10 @@ deshalb sucht das Programm sie selbst. **Mode 22 liest nur**, am Steuergerät wi
    `=KW` heißt: verhält sich genau wie das Kühlwasser, ist also wahrscheinlich nicht das Öl.
    Öl wird langsamer warm und liegt im Fahrbetrieb meist etwas über dem Kühlwasser.
 4. **Kandidat lang drücken** = speichern. Ab dann kommt die Öltemperatur von dieser DID
-   (mit `*` markiert). Ist eine DID gespeichert und keine Kandidatenliste da, kann man sie dort
-   per langem Druck wieder löschen.
+   (mit `*` markiert) statt von `11BD`. Ohne Kandidatenliste zeigt die Seite die aktive DID;
+   eine abweichende lässt sich dort per langem Druck wieder auf `11BD` zurücksetzen.
 
-Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`). Ist eine DID
-gespeichert, bleibt das für alle Live-Werte so; nur zum Fehlercode-Lesen wird kurz auf Rundruf
+Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`). Das gilt für alle Live-Werte; nur zum Fehlercode-Lesen wird kurz auf Rundruf
 (`ATSH7DF`) umgeschaltet. Die Serial-Ausgabe (`[SCAN] ...`) listet alle Treffer und Kandidaten mit.
 
 ## Dateien

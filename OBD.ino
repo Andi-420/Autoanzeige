@@ -103,6 +103,7 @@ static bool gElmOK = false;       // ELM327-Adapter antwortet
 static bool gEcuOK = false;       // Steuergeraet antwortet (Zuendung an)
 static bool gOilOK = false;     // bis zur ersten gueltigen Antwort "N/A" anzeigen
 static bool gIsCan = true;        // Protokoll (nur im OBD-Task benutzt), per ATDPN ermittelt
+static bool sProtoKnown = false;  // erst true, wenn ATDPN ein echtes Protokoll meldet
 static volatile bool gFetchDTC = false;   // gesetzt von LVGL-Task, gelesen von OBD-Task
 
 // DTC-Lesestatus fuer die Anzeige
@@ -142,8 +143,12 @@ struct ScanStatus {                 // unter Mutex
   bool    candNowOk[OIL_MAX_CANDS];
 };
 static ScanStatus gScan = { SCAN_IDLE, 0, "", 0 };
-static uint16_t gOilDid = 0;        // gespeicherte Oel-DID (0 = keine, Standard-PID 0x5C nutzen)
-static uint8_t  gOilFml = 0;        // Formel-Index (siehe OilScan.h), unter Mutex
+// Oel-Temperatur beim Fabia 3 / 1.0 TSI: DID 0x11BD, Kelvin/10 (per Oel-Suche ermittelt).
+// Ist fest eingebaut; eine per Oel-Suche gespeicherte andere DID hat Vorrang.
+#define OIL_DID_DEFAULT 0x11BD
+#define OIL_FML_DEFAULT 2           // K/10, siehe OIL_FML_NAME in OilScan.h
+static uint16_t gOilDid = OIL_DID_DEFAULT; // 0 = keine, Standard-PID 0x5C nutzen
+static uint8_t  gOilFml = OIL_FML_DEFAULT; // Formel-Index (siehe OilScan.h), unter Mutex
 
 // Flag: neue Daten verfügbar → LVGL-Task soll Display updaten
 static volatile bool gNewData = false;
@@ -870,10 +875,10 @@ static void build_page_oilscan(void) {
       char m[96];
       if (i == 0 && os_slot0_saved) {               // gespeicherte DID loeschen
         xSemaphoreTake(dataMutex, portMAX_DELAY);
-        gOilDid = 0; gOilFml = 0;
+        gOilDid = OIL_DID_DEFAULT; gOilFml = OIL_FML_DEFAULT;
         xSemaphoreGive(dataMutex);
         prefs.remove("oilDid"); prefs.remove("oilFml");
-        oilscan_set_msg("Gespeicherte DID geloescht.\nOel kommt wieder von PID 0x5C.");
+        oilscan_set_msg("Zurueck auf den festen Wert 11BD (K/10).");
       } else {
         xSemaphoreTake(dataMutex, portMAX_DELAY);
         bool valid = i < gScan.nCand;
@@ -968,8 +973,12 @@ static void refresh_oilscan(void) {
       lv_obj_set_style_text_color(l, lv_color_hex(c.likeCoolant ? C_MUTED : C_GREEN), 0);
       lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
     } else if (i == 0 && did && !running && st.nCand == 0) {
-      os_slot0_saved = true;
-      snprintf(buf, sizeof(buf), "Gespeichert: %04X (%s) - lang = loeschen", did, OIL_FML_NAME[fml]);
+      bool isDefault = (did == OIL_DID_DEFAULT && fml == OIL_FML_DEFAULT);
+      os_slot0_saved = !isDefault;   // nur eine abweichende DID kann zurueckgesetzt werden
+      if (isDefault)
+        snprintf(buf, sizeof(buf), "Aktiv: %04X (%s) - fest eingebaut", did, OIL_FML_NAME[fml]);
+      else
+        snprintf(buf, sizeof(buf), "Aktiv: %04X (%s) - lang = zurueck auf 11BD", did, OIL_FML_NAME[fml]);
       lv_label_set_text(l, buf);
       lv_obj_set_style_text_color(l, lv_color_hex(C_YELLOW), 0);
       lv_obj_remove_flag(b, LV_OBJ_FLAG_HIDDEN);
@@ -1257,13 +1266,30 @@ static bool elmParseOBD(const String &resp, const char *tag,
 // 7E0 = direkt an das Motorsteuergeraet (noetig fuer Mode 22 / UDS)
 static bool sHdrPhys = false;
 static void elmHeader(bool phys) {
-  if (!gIsCan || phys == sHdrPhys) return;
-  elmSendCmd(phys ? "ATSH7E0" : "ATSH7DF", 1000);
-  sHdrPhys = phys;
+  // Erst umschalten, wenn das Protokoll sicher als CAN erkannt ist
+  if (!sProtoKnown || !gIsCan || phys == sHdrPhys) return;
+  String r = elmSendCmd(phys ? "ATSH7E0" : "ATSH7DF", 1000);
+  if (r.indexOf("OK") >= 0) sHdrPhys = phys;   // sonst beim naechsten Mal erneut versuchen
+}
+
+// Protokoll abfragen. Antwortet das Auto noch nicht (Zuendung aus), meldet der ELM
+// "0" bzw. "A0" = unbekannt. Dann NICHT als "kein CAN" werten, sondern spaeter
+// erneut fragen (sonst bliebe die Oel-Abfrage per 7E0 bis zum Neustart aus).
+static void elmDetectProto(void) {
+  String dp = elmSendCmd("ATDPN", 1000);
+  dp.trim();
+  if (dp.length() > 0 && dp[0] == 'A') dp = dp.substring(1);   // "A6" = automatisch, Protokoll 6
+  if (dp.length() != 1) return;
+  char p = dp[0];
+  if (p == '0' || !isHexadecimalDigit(p)) return;
+  gIsCan = (p >= '6' && p <= '9') || (p >= 'A' && p <= 'C');
+  sProtoKnown = true;
+  Serial.printf("[ELM] Protokoll %c (%s)\n", p, gIsCan ? "CAN" : "kein CAN");
 }
 
 static void elmInit(void) {
   sHdrPhys = false;   // ATZ setzt den Header zurueck
+  sProtoKnown = false;
   String ver = elmSendCmd("ATZ", 3000);
   if (!ver.length()) {
     Serial.println("[ELM] keine Antwort");
@@ -1277,13 +1303,8 @@ static void elmInit(void) {
   // Erste Anfrage loest die automatische Protokollsuche aus (kann dauern),
   // danach das erkannte Protokoll abfragen: 6..9 = CAN (A..C ebenfalls CAN).
   elmSendCmd("0100", 8000);
-  String dp = elmSendCmd("ATDPN", 1000);
-  dp.replace("A", "");   // "A6" = automatisch gewaehlt, Protokoll 6
-  if (dp.length() > 0) {
-    char p = dp[dp.length() - 1];
-    gIsCan = (p >= '6' && p <= '9') || (p >= 'A' && p <= 'C');
-  }
-  Serial.printf("[ELM] Protokoll %s (%s)\n", dp.c_str(), gIsCan ? "CAN" : "kein CAN");
+  elmDetectProto();
+  if (!sProtoKnown) Serial.println("[ELM] Protokoll noch unbekannt (Zuendung aus?) - wird spaeter erkannt");
 
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   gElmOK = true;
@@ -1427,7 +1448,9 @@ static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
 // ══════════════════════════════════════════════════════════════════
 // OEL-SUCHE (laeuft im OBD-Task, normale Anzeige ist solange pausiert)
 // ══════════════════════════════════════════════════════════════════
-static OilHit sHits[OIL_MAX_HITS];  // nur OBD-Task (und setup vor Task-Start)
+// Trefferliste liegt im PSRAM (ca. 10 KB) - der interne RAM (DRAM) ist knapp.
+// Wird in setup() angelegt; nur OBD-Task (und setup vor Task-Start) greift zu.
+static OilHit *sHits = nullptr;
 static int    sHitCount = 0;
 static float  sCoolCold = 0;        // Kuehlwasser beim Kalt-Scan
 
@@ -1474,7 +1497,9 @@ static void scanRestoreHeader(void) {
 
 // Schritt 1: alle DIDs im Bereich abfragen, positive Antworten merken
 static void oilScanCold(bool full) {
+  if (!sProtoKnown) { scanStatus(SCAN_ERROR, "Auto antwortet noch nicht.\nZuendung an und kurz warten."); return; }
   if (!gIsCan) { scanStatus(SCAN_ERROR, "Oel-Suche geht nur bei CAN-Fahrzeugen."); return; }
+  if (!sHits) { scanStatus(SCAN_ERROR, "Kein Speicher fuer die Trefferliste (PSRAM)."); return; }
   elmHeader(true);
   sHitCount = 0;
   const uint32_t lo = full ? 0x0000 : 0x1000, hi = full ? 0xFFFF : 0x2FFF;
@@ -1677,8 +1702,14 @@ static void obdTask(void *param) {
     uint32_t now = millis();
 
     // ── Schnelle Werte: JEDEN Zyklus (Drehzahl, Ladedruck) ─────────
-    if (obdQuery("010C", "410C", a, b))
+    if (obdQuery("010C", "410C", a, b)) {
       rpm = ((int)a * 256 + b) / 4;
+      // Auto antwortet jetzt -> Protokoll steht fest; falls beim Start noch unbekannt, nachholen
+      if (!sProtoKnown) {
+        elmDetectProto();
+        scanRestoreHeader();
+      }
+    }
 
     // Ladedruck: MAP (Drosselklappendruck, PID 0x0B) minus Umgebungsdruck (PID 0x33)
     if (obdQuery("010B", "410B", a, b))
@@ -1837,13 +1868,14 @@ void setup() {
   Set_Backlight(gBrightness);
   gOffLong = prefs.getFloat("offLong", 0.0f);
   gOffLat  = prefs.getFloat("offLat", 0.0f);
-  gOilDid  = prefs.getUShort("oilDid", 0);
-  gOilFml  = prefs.getUChar("oilFml", 0);
-  if (gOilFml >= OIL_FML_COUNT) { gOilDid = 0; gOilFml = 0; }
+  gOilDid  = prefs.getUShort("oilDid", OIL_DID_DEFAULT);
+  gOilFml  = prefs.getUChar("oilFml", OIL_FML_DEFAULT);
+  if (gOilDid == 0 || gOilFml >= OIL_FML_COUNT) { gOilDid = OIL_DID_DEFAULT; gOilFml = OIL_FML_DEFAULT; }
   // Treffer eines frueheren Kalt-Scans (Warm-Vergleich auch nach Neustart moeglich)
   {
     size_t len = prefs.getBytesLength("scanHits");
-    if (len > 0 && len % sizeof(OilHit) == 0 && len <= sizeof(sHits)) {
+    sHits = (OilHit*)heap_caps_calloc(OIL_MAX_HITS, sizeof(OilHit), MALLOC_CAP_SPIRAM);
+    if (sHits && len > 0 && len % sizeof(OilHit) == 0 && len <= OIL_MAX_HITS * sizeof(OilHit)) {
       prefs.getBytes("scanHits", sHits, len);
       sHitCount = len / sizeof(OilHit);
       sCoolCold = prefs.getFloat("scanCool", 0.0f);
