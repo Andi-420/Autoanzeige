@@ -689,6 +689,22 @@ static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_boost_status = nullptr;
 
+// ── Schaltblitz (wie im Rennsport): roter Ring am Displayrand blinkt ab SHIFT_RPM ──
+#define SHIFT_RPM       3500
+#define SHIFT_BLINK_MS  100    // Umschaltintervall -> 5x pro Sekunde an/aus
+static lv_obj_t *shift_ring = nullptr;
+static bool shiftActive = false;   // nur im LVGL-Task benutzt
+
+static void shift_blink_cb(lv_timer_t *t) {
+  if (!shift_ring) return;
+  if (shiftActive && curPage == PAGE_BOOST) {
+    if (lv_obj_has_flag(shift_ring, LV_OBJ_FLAG_HIDDEN)) lv_obj_remove_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+    else                                                 lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+  } else if (!lv_obj_has_flag(shift_ring, LV_OBJ_FLAG_HIDDEN)) {
+    lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
 // Skalierung: bar -> Arc-Wert in "Centibar" (int), damit lv_arc mit 0.01-bar-Aufloesung arbeiten kann
 #define BOOST_ARC_MIN (-60)   // -0.6 bar
 #define BOOST_ARC_MAX  200    // +2.0 bar
@@ -783,6 +799,20 @@ static void build_page_boost(void) {
   lv_obj_set_style_text_color(lbl_boost_status, lv_color_hex(C_MUTED), 0);
   lv_obj_align(lbl_boost_status, LV_ALIGN_CENTER, 0, 100);
 
+  // Schaltblitz-Ring ganz aussen (Radius ca. 223..235 px), liegt ausserhalb aller Anzeigen
+  shift_ring = lv_arc_create(scr);
+  lv_obj_set_size(shift_ring, 470, 470);
+  lv_obj_center(shift_ring);
+  lv_arc_set_bg_angles(shift_ring, 0, 360);
+  lv_obj_set_style_arc_color(shift_ring, lv_color_hex(C_RED), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(shift_ring, 12, LV_PART_MAIN);
+  lv_obj_set_style_arc_opa(shift_ring, LV_OPA_TRANSP, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(shift_ring, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_remove_style(shift_ring, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(shift_ring, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
+  lv_timer_create(shift_blink_cb, SHIFT_BLINK_MS, nullptr);
+
   // Knopf zur Oel-Suche (fuer Autos ohne Standard-PID 0x5C, z.B. VAG)
   lv_obj_t *bs = make_button(scr, 130, 32, C_MUTED, "OEL-SUCHE", &lv_font_montserrat_12);
   lv_obj_align(bs, LV_ALIGN_CENTER, 0, 150);
@@ -793,13 +823,16 @@ static void build_page_boost(void) {
 
 static void refresh_boost(void) {
   float boostBar;
-  int oil;
+  int oil, rpm;
   bool oilOk;
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   boostBar = gBoostBar;
   oil = gOilTemp;
   oilOk = gOilOK;
+  rpm = gRPM;
   xSemaphoreGive(dataMutex);
+
+  shiftActive = rpm >= SHIFT_RPM;   // Blinken selbst macht shift_blink_cb
 
   // ── Ladedruck-Arc + Label ───────────────────────────────────
   char buf[16];
