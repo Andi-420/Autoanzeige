@@ -37,9 +37,17 @@ fi
 
 # 4) Sketch + Simulator bauen und ausfuehren
 cp "$ROOT/OBD.ino" "$B/sketch.cpp"
+# C-Dateien im Sketch-Ordner (z.B. eigene Schriften font_*.c) mitbauen
+EXTRA_OBJ=""
+for c in "$ROOT"/*.c; do
+  [ -f "$c" ] || continue
+  o="$B/$(basename "$c" .c).o"
+  gcc -c -O1 -w -DLV_CONF_INCLUDE_SIMPLE -I"$B" -I"$B/lvgl" "$c" -o "$o"
+  EXTRA_OBJ="$EXTRA_OBJ $o"
+done
 g++ -std=gnu++17 -Wall -Wno-unused -DLV_CONF_INCLUDE_SIMPLE \
     -I"$B" -I"$SIM/stub" -I"$B/lvgl" -idirafter "$ROOT" -include Arduino.h \
-    "$SIM/sim_main.cpp" "$B/liblvgl.a" -lm -o "$B/sim"
+    "$SIM/sim_main.cpp" $EXTRA_OBJ "$B/liblvgl.a" -lm -o "$B/sim"
 cd "$B"
 rm -f out_*.ppm out_*.png
 set +e

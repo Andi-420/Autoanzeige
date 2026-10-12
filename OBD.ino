@@ -90,7 +90,13 @@ static SemaphoreHandle_t dataMutex = nullptr;
 static float gBatt = 0.0f;
 static int   gOilTemp = 0;
 static int   gCoolant = 0;
-static int   gRPM = 0;
+static int   gRPM = 0;            // Startseite zeigt sie nicht mehr, wird fuer den Schaltblitz gebraucht
+static float gCatTemp = 0.0f;     // PID 0x3C, Katalysatortemperatur Bank 1 Sensor 1 (Grad C)
+static bool  gCatOK = false;
+static float gTiming = 0.0f;      // PID 0x0E, Zuendwinkel (Grad vor OT, negativ = nach OT)
+static bool  gTimingOK = false;
+static int   gIntakeTemp = 0;     // PID 0x0F, Ansauglufttemperatur (Grad C)
+static bool  gIntakeOK = false;
 
 // Ladedruck-Berechnung: MAP (Drosselklappen-/Saugrohrdruck) - Umgebungsdruck
 static float gMapKPa = 0.0f;      // PID 0x0B, absoluter Druck nach Drosselklappe (kPa)
@@ -437,8 +443,8 @@ static void build_page_main(void) {
 
   create_tile_main(scr, 0, "SPANNUNG",   "VOLT",   110, 150);
   create_tile_main(scr, 1, "OEL-TEMP",   "GRAD C", -20, 150);
-  create_tile_main(scr, 2, "KUEHLWASSER","GRAD C", -20, 130);
-  create_tile_main(scr, 3, "DREHZAHL",   "U/MIN",  0, 8000);
+  create_tile_main(scr, 2, "KAT-TEMP",   "GRAD C", 0, 1000);
+  create_tile_main(scr, 3, "ZUENDWINKEL","GRAD V.OT", -10, 40);
 
   lbl_obd_status = lv_label_create(scr);
   lv_label_set_text(lbl_obd_status, "INIT");
@@ -463,11 +469,13 @@ static void update_tile(int idx, const char *vs, int raw, uint32_t col) {
 
 static void refresh_main(void) {
   float batt;
-  int oil, cool, rpm;
-  bool oilOk, elmOk, ecuOk;
+  int oil;
+  float cat, timing;
+  bool oilOk, catOk, timingOk, elmOk, ecuOk;
   xSemaphoreTake(dataMutex, portMAX_DELAY);
-  batt = gBatt; oil = gOilTemp; cool = gCoolant;
-  rpm = gRPM; oilOk = gOilOK; elmOk = gElmOK; ecuOk = gEcuOK;
+  batt = gBatt; oil = gOilTemp;
+  cat = gCatTemp; catOk = gCatOK; timing = gTiming; timingOk = gTimingOK;
+  oilOk = gOilOK; elmOk = gElmOK; ecuOk = gEcuOK;
   xSemaphoreGive(dataMutex);
 
   char buf[12];
@@ -482,11 +490,19 @@ static void refresh_main(void) {
   }
   update_tile(1, buf, oilOk ? oil : -20, oil_temp_color(oil, oilOk));
 
-  snprintf(buf,sizeof(buf),"%d",cool);
-  update_tile(2,buf,cool,cool>110?C_RED:cool<50?C_YELLOW:C_CYAN);
+  // Kat: unter ~300 C noch nicht auf Betriebstemperatur (cyan), normal gruen,
+  // ab 850 C sehr heiss (orange), ab 950 C kritisch (rot)
+  int ci = (int)lroundf(cat);
+  if (catOk) snprintf(buf, sizeof(buf), "%d", ci);
+  else       snprintf(buf, sizeof(buf), "N/A");
+  uint32_t cc = !catOk ? C_MUTED : ci > 950 ? C_RED : ci > 850 ? C_ORANGE : ci < 300 ? C_CYAN : C_GREEN;
+  update_tile(2, buf, catOk ? ci : 0, cc);
 
-  snprintf(buf,sizeof(buf),"%d",rpm);
-  update_tile(3,buf,rpm,rpm>6000?C_RED:rpm>4500?C_ORANGE:C_CYAN);
+  // Zuendwinkel: negativ = Zuendung nach OT (z.B. Klopfregelung / Kat-Heizen) -> orange
+  if (timingOk) snprintf(buf, sizeof(buf), "%.1f", timing);
+  else          snprintf(buf, sizeof(buf), "N/A");
+  uint32_t tc = !timingOk ? C_MUTED : timing < 0.0f ? C_ORANGE : C_CYAN;
+  update_tile(3, buf, timingOk ? (int)lroundf(timing) : -10, tc);
 
   // ELM? = Adapter antwortet nicht | ECU? = Adapter ok, Auto antwortet nicht (Zuendung aus?)
   const char *st = !elmOk ? "ELM?" : !ecuOk ? "ECU?" : "OBD OK";
@@ -687,7 +703,54 @@ static lv_obj_t *boost_arc = nullptr;
 static lv_obj_t *oil_arc = nullptr;
 static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
-static lv_obj_t *lbl_boost_status = nullptr;
+static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
+
+// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold, font_boost_*.c im Sketch-Ordner)
+extern "C" {
+  LV_FONT_DECLARE(font_boost_76);   // Ladedruck-Wert
+  LV_FONT_DECLARE(font_boost_40);   // Oel-Temperatur
+  LV_FONT_DECLARE(font_boost_24);   // "BOOST"
+}
+
+// Layout (Durchmesser/Breite der Ringe, vertikale Positionen relativ zur Mitte)
+#define BOOST_RING_D  424
+#define BOOST_RING_W   30
+#define OIL_RING_D    340
+#define OIL_RING_W     20
+#define BOOST_Y_TITLE (-95)
+#define BOOST_Y_VAL   (-28)
+#define BOOST_Y_UNIT   26
+#define OIL_Y_VAL      66
+#define OIL_Y_UNIT    104
+#define SMALL_X        55   // Oel links (-55), Ansaugluft rechts (+55)
+
+// Bogen 135..405 Grad (unten offen) mit dunklem Hintergrund-Bogen; liefert den Wert-Bogen
+static lv_obj_t* make_gauge(lv_obj_t *scr, int d, int w, int vmin, int vmax, uint32_t col) {
+  lv_obj_t *bg = lv_arc_create(scr);
+  lv_obj_set_size(bg, d, d); lv_obj_center(bg);
+  lv_arc_set_bg_angles(bg, 135, 405); lv_arc_set_value(bg, 100);
+  lv_obj_set_style_arc_color(bg, lv_color_hex(C_RING_BG), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(bg, w, LV_PART_MAIN);
+  lv_obj_set_style_arc_rounded(bg, true, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(bg, lv_color_hex(C_RING_BG), LV_PART_INDICATOR);
+  lv_obj_set_style_arc_width(bg, w, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(bg, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_remove_style(bg, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t *a = lv_arc_create(scr);
+  lv_obj_set_size(a, d, d); lv_obj_center(a);
+  lv_arc_set_bg_angles(a, 135, 405);
+  lv_arc_set_range(a, vmin, vmax);
+  lv_arc_set_value(a, vmin);
+  lv_obj_set_style_arc_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(a, lv_color_hex(col), LV_PART_INDICATOR);
+  lv_obj_set_style_arc_width(a, w, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
+  lv_obj_remove_style(a, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
+  return a;
+}
 
 // ── Schaltblitz (wie im Rennsport): roter Ring am Displayrand blinkt ab SHIFT_RPM ──
 #define SHIFT_RPM       3500
@@ -715,89 +778,56 @@ static void build_page_boost(void) {
   lv_obj_t *scr = make_screen();
   screens[PAGE_BOOST] = scr;
 
-  add_title(scr, "LADEDRUCK / OEL-TEMP", C_PURPLE);
+  // Kein Titel: "BOOST" steht in der Mitte, dadurch sind Ringe und Schrift groesser.
+  // Radien (px vom Mittelpunkt): Schaltblitz 223..235 | Ladedruck 182..212 | Oel 150..170
+  boost_arc = make_gauge(scr, BOOST_RING_D, BOOST_RING_W, BOOST_ARC_MIN, BOOST_ARC_MAX, C_PURPLE);
+  oil_arc   = make_gauge(scr, OIL_RING_D,   OIL_RING_W,   OIL_ARC_MIN,   OIL_ARC_MAX,   C_CYAN);
 
-  // ── Aeusserer Arc: LADEDRUCK (lila) ─────────────────────────
-  lv_obj_t *abg_boost = lv_arc_create(scr);
-  lv_obj_set_size(abg_boost, 300, 300); lv_obj_center(abg_boost);
-  lv_arc_set_bg_angles(abg_boost, 135, 405); lv_arc_set_value(abg_boost, 100);
-  lv_obj_set_style_arc_color(abg_boost, lv_color_hex(C_RING_BG), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(abg_boost, 18, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(abg_boost, lv_color_hex(C_RING_BG), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(abg_boost, 18, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(abg_boost, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_remove_style(abg_boost, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(abg_boost, LV_OBJ_FLAG_CLICKABLE);
+  // ── Mitte: BOOST + Wert + Einheit ─────────────────────────────
+  lv_obj_t *lb = lv_label_create(scr);
+  lv_label_set_text(lb, "BOOST");
+  lv_obj_set_style_text_font(lb, &font_boost_24, 0);
+  lv_obj_set_style_text_color(lb, lv_color_hex(C_PURPLE), 0);
+  lv_obj_set_style_text_letter_space(lb, 3, 0);
+  lv_obj_align(lb, LV_ALIGN_CENTER, 0, BOOST_Y_TITLE);
 
-  boost_arc = lv_arc_create(scr);
-  lv_obj_set_size(boost_arc, 300, 300); lv_obj_center(boost_arc);
-  lv_arc_set_bg_angles(boost_arc, 135, 405);
-  lv_arc_set_range(boost_arc, BOOST_ARC_MIN, BOOST_ARC_MAX);
-  lv_arc_set_value(boost_arc, 0);
-  lv_obj_set_style_arc_color(boost_arc, lv_color_hex(0x111122), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(boost_arc, 1, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(boost_arc, lv_color_hex(C_PURPLE), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(boost_arc, 18, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_rounded(boost_arc, true, LV_PART_INDICATOR);
-  lv_obj_remove_style(boost_arc, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(boost_arc, LV_OBJ_FLAG_CLICKABLE);
-
-  // ── Innerer, paralleler Arc: OEL-TEMPERATUR ─────────────────
-  lv_obj_t *abg_oil = lv_arc_create(scr);
-  lv_obj_set_size(abg_oil, 226, 226); lv_obj_center(abg_oil);
-  lv_arc_set_bg_angles(abg_oil, 135, 405); lv_arc_set_value(abg_oil, 100);
-  lv_obj_set_style_arc_color(abg_oil, lv_color_hex(C_RING_BG), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(abg_oil, 16, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(abg_oil, lv_color_hex(C_RING_BG), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(abg_oil, 16, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(abg_oil, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_remove_style(abg_oil, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(abg_oil, LV_OBJ_FLAG_CLICKABLE);
-
-  oil_arc = lv_arc_create(scr);
-  lv_obj_set_size(oil_arc, 226, 226); lv_obj_center(oil_arc);
-  lv_arc_set_bg_angles(oil_arc, 135, 405);
-  lv_arc_set_range(oil_arc, OIL_ARC_MIN, OIL_ARC_MAX);
-  lv_arc_set_value(oil_arc, 0);
-  lv_obj_set_style_arc_color(oil_arc, lv_color_hex(0x111122), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(oil_arc, 1, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(oil_arc, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(oil_arc, 16, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_rounded(oil_arc, true, LV_PART_INDICATOR);
-  lv_obj_remove_style(oil_arc, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(oil_arc, LV_OBJ_FLAG_CLICKABLE);
-
-  // ── Ladedruck-Anzeige ────────────────────────────────────────
   lbl_boost_val = lv_label_create(scr);
-  lv_label_set_text(lbl_boost_val, "--");
-  lv_obj_set_style_text_font(lbl_boost_val, &lv_font_montserrat_40, 0);
+  lv_label_set_text(lbl_boost_val, "-.--");
+  lv_obj_set_style_text_font(lbl_boost_val, &font_boost_76, 0);
   lv_obj_set_style_text_color(lbl_boost_val, lv_color_hex(C_PURPLE), 0);
-  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, -34);
+  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, BOOST_Y_VAL);
 
   lv_obj_t *lu = lv_label_create(scr);
-  lv_label_set_text(lu, "bar (Ladedruck)");
-  lv_obj_set_style_text_font(lu, &lv_font_montserrat_14, 0);
+  lv_label_set_text(lu, "bar");
+  lv_obj_set_style_text_font(lu, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(lu, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lu, LV_ALIGN_CENTER, 0, 4);
+  lv_obj_align(lu, LV_ALIGN_CENTER, 0, BOOST_Y_UNIT);
 
-  // ── Oel-Temperatur-Anzeige ───────────────────────────────────
+  // ── Oel-Temperatur darunter ──────────────────────────────────
   lbl_oil_val = lv_label_create(scr);
   lv_label_set_text(lbl_oil_val, "--");
-  lv_obj_set_style_text_font(lbl_oil_val, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_font(lbl_oil_val, &font_boost_40, 0);
   lv_obj_set_style_text_color(lbl_oil_val, lv_color_hex(C_CYAN), 0);
-  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, 44);
+  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, -SMALL_X, OIL_Y_VAL);
 
   lv_obj_t *lu2 = lv_label_create(scr);
-  lv_label_set_text(lu2, "Grad C (Oel)");
+  lv_label_set_text(lu2, "OEL C");
   lv_obj_set_style_text_font(lu2, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(lu2, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lu2, LV_ALIGN_CENTER, 0, 76);
+  lv_obj_align(lu2, LV_ALIGN_CENTER, -SMALL_X, OIL_Y_UNIT);
 
-  lbl_boost_status = lv_label_create(scr);
-  lv_label_set_text(lbl_boost_status, "MAP - Umgebungsdruck");
-  lv_obj_set_style_text_font(lbl_boost_status, &lv_font_montserrat_12, 0);
-  lv_obj_set_style_text_color(lbl_boost_status, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lbl_boost_status, LV_ALIGN_CENTER, 0, 100);
+  // ── Ansauglufttemperatur rechts daneben (gleiche Groesse wie Oel) ──
+  lbl_iat_val = lv_label_create(scr);
+  lv_label_set_text(lbl_iat_val, "--");
+  lv_obj_set_style_text_font(lbl_iat_val, &font_boost_40, 0);
+  lv_obj_set_style_text_color(lbl_iat_val, lv_color_hex(C_CYAN), 0);
+  lv_obj_align(lbl_iat_val, LV_ALIGN_CENTER, SMALL_X, OIL_Y_VAL);
+
+  lv_obj_t *lu3 = lv_label_create(scr);
+  lv_label_set_text(lu3, "ANSAUG C");
+  lv_obj_set_style_text_font(lu3, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(lu3, lv_color_hex(C_MUTED), 0);
+  lv_obj_align(lu3, LV_ALIGN_CENTER, SMALL_X, OIL_Y_UNIT);
 
   // Schaltblitz-Ring ganz aussen (Radius ca. 223..235 px), liegt ausserhalb aller Anzeigen
   shift_ring = lv_arc_create(scr);
@@ -838,7 +868,7 @@ static void refresh_boost(void) {
   char buf[16];
   snprintf(buf, sizeof(buf), "%+.2f", boostBar);
   lv_label_set_text(lbl_boost_val, buf);
-  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, -34);
+  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, BOOST_Y_VAL);
 
   int boostArcVal = (int)roundf(boostBar * 100.0f); // bar -> centibar
   boostArcVal = constrain(boostArcVal, BOOST_ARC_MIN, BOOST_ARC_MAX);
@@ -860,7 +890,7 @@ static void refresh_boost(void) {
     snprintf(buf, sizeof(buf), "N/A");
   }
   lv_label_set_text(lbl_oil_val, buf);
-  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, 44);
+  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, -SMALL_X, OIL_Y_VAL);
 
   int oilArcVal = oilOk ? constrain(oil, OIL_ARC_MIN, OIL_ARC_MAX) : OIL_ARC_MIN;
   lv_arc_set_value(oil_arc, oilArcVal);
@@ -868,6 +898,20 @@ static void refresh_boost(void) {
   uint32_t oilCol = oil_temp_color(oil, oilOk);
   lv_obj_set_style_arc_color(oil_arc, lv_color_hex(oilCol), LV_PART_INDICATOR);
   lv_obj_set_style_text_color(lbl_oil_val, lv_color_hex(oilCol), 0);
+
+  // ── Ansauglufttemperatur ──────────────────────────────────────
+  // Nach dem Ladeluftkuehler normal ca. Aussentemperatur + 10..30 C;
+  // Hitzestau (Stau, mehrfach Vollgas) -> gelb ab 50 C, rot ab 65 C
+  int iat; bool iatOk;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  iat = gIntakeTemp; iatOk = gIntakeOK;
+  xSemaphoreGive(dataMutex);
+  if (iatOk) snprintf(buf, sizeof(buf), "%d", iat);
+  else       snprintf(buf, sizeof(buf), "N/A");
+  lv_label_set_text(lbl_iat_val, buf);
+  lv_obj_align(lbl_iat_val, LV_ALIGN_CENTER, SMALL_X, OIL_Y_VAL);
+  uint32_t iatCol = !iatOk ? C_MUTED : iat >= 65 ? C_RED : iat >= 50 ? C_YELLOW : C_CYAN;
+  lv_obj_set_style_text_color(lbl_iat_val, lv_color_hex(iatCol), 0);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1711,7 +1755,19 @@ static void probeMap87(void) {
   Serial.printf("[MAP] PID 0x87 %s\n", sMap87 ? "wird genutzt (bis 2048 kPa)" : "nicht verfuegbar, nutze 0x0B (max 255 kPa)");
 }
 
-#define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel
+// Nicht unterstuetzte PIDs nicht dauernd abfragen: nach 5 Fehlversuchen nur alle 30 s
+struct PidBackoff { uint8_t fail; uint32_t tRetry; };
+static bool pidDue(const PidBackoff &p, uint32_t now) {
+  return p.fail < 5 || now - p.tRetry >= 30000UL;
+}
+static void pidResult(PidBackoff &p, bool ok, uint32_t now) {
+  if (ok) { p.fail = 0; return; }
+  if (p.fail < 255) p.fail++;
+  p.tRetry = now;
+}
+
+#define TIMING_MS      250UL   // Zuendwinkel (aendert sich schnell, aber nicht jeden Zyklus noetig)
+#define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel, Kat
 #define AMB_MS       10000UL   // Umgebungsdruck
 #define OIL_MAX_FAIL  5
 #define OIL_RETRY_MS 30000UL
@@ -1721,7 +1777,8 @@ static void obdTask(void *param) {
   delay(1000);
   elmInit();
 
-  uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0;
+  uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0, tTiming = 0;
+  PidBackoff boCat = {0, 0}, boTiming = {0, 0}, boIat = {0, 0};
   uint8_t oilFail = 0;
 
   for (;;) {
@@ -1782,6 +1839,9 @@ static void obdTask(void *param) {
     float mapKPa = gMapKPa;
     float ambKPa = gAmbientKPa;
     float boostBar = gBoostBar;
+    float cat = gCatTemp, timing = gTiming;
+    bool catOk = gCatOK, timingOk = gTimingOK;
+    int iat = gIntakeTemp; bool iatOk = gIntakeOK;
 
     uint32_t now = millis();
 
@@ -1803,6 +1863,15 @@ static void obdTask(void *param) {
     else if (obdQuery("010B", "410B", a, b))
       mapKPa = (float)a; // PID 0x0B liefert Druck direkt in kPa (0-255)
 
+    // ── Zuendwinkel: 4x pro Sekunde ────────────────────────────────
+    if (now - tTiming >= TIMING_MS && pidDue(boTiming, now)) {
+      tTiming = now;
+      bool okT = obdQuery("010E", "410E", a, b);
+      if (okT) timing = a / 2.0f - 64.0f;   // A/2 - 64 Grad vor OT
+      timingOk = okT;
+      pidResult(boTiming, okT, now);
+    }
+
     // ── Langsame Werte: ca. 1x pro Sekunde ─────────────────────────
     if (now - tSlow >= SLOW_MS) {
       tSlow = now;
@@ -1817,6 +1886,22 @@ static void obdTask(void *param) {
 
       if (obdQuery("0105", "4105", a, b))
         cool = (int)a - 40;
+
+      // Ansauglufttemperatur: A - 40 Grad C
+      if (pidDue(boIat, now)) {
+        bool okI = obdQuery("010F", "410F", a, b);
+        if (okI) iat = (int)a - 40;
+        iatOk = okI;
+        pidResult(boIat, okI, now);
+      }
+
+      // Katalysatortemperatur Bank 1 Sensor 1: (A*256+B)/10 - 40 Grad C
+      if (pidDue(boCat, now)) {
+        bool okC = obdQuery("013C", "413C", a, b);
+        if (okC) cat = ((a << 8) | b) / 10.0f - 40.0f;
+        catOk = okC;
+        pidResult(boCat, okC, now);
+      }
 
       // Oel-Temperatur (PID 0x5C): viele Autos kennen diese PID nicht und
       // antworten jedes Mal mit NO DATA. Nach OIL_MAX_FAIL Fehlversuchen
@@ -1875,6 +1960,9 @@ static void obdTask(void *param) {
     gAmbientKPa = ambKPa;
     gBoostBar = boostBar;
     gOilOK = oilOk;
+    gCatTemp = cat; gCatOK = catOk;
+    gTiming = timing; gTimingOK = timingOk;
+    gIntakeTemp = iat; gIntakeOK = iatOk;
     gElmOK = elmOk;
     gEcuOK = ecuOk;
     gNewData = true;

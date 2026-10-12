@@ -38,8 +38,8 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 
 | Seite | Inhalt |
 |---|---|
-| **Hauptseite** | Batteriespannung, Öltemperatur, Kühlwasser, Drehzahl. In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht) |
-| **Ladedruck / Öl** | Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Innerer Bogen: Öltemperatur. **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
+| **Hauptseite** | Batteriespannung, Öltemperatur, Katalysatortemperatur (cyan < 300 °C, grün, orange > 850 °C, rot > 950 °C), Zündwinkel (° vor OT; orange wenn negativ = nach OT). Drehzahl und Kühlwasser zeigt schon das Kombiinstrument; sie werden intern weiter gelesen (Schaltblitz, Öl-Suche). In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht) |
+| **Ladedruck / Öl** | Großer Ladedruck-Ring außen, Öl-Ring innen, in der Mitte **BOOST** mit Wert in fetter Schrift. Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Innerer Bogen: Öltemperatur. Unter dem Ladedruck klein nebeneinander: **Öl** (links) und **Ansaugluft** (rechts; cyan, gelb ab 50 °C, rot ab 65 °C). **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
 | **Fehlercodes** | „AUSLESEN“ tippen, dann werden die gespeicherten Fehlercodes (Mode 03) angezeigt, z. B. `P0123` |
 | **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten |
 | **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** löscht die Max-Werte. **RESET lange drücken** (Auto steht still) setzt den Nullpunkt, um einen schrägen Einbau auszugleichen. Der Nullpunkt wird gespeichert |
@@ -48,12 +48,17 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 
 | Wert | Befehl / PID | Intervall |
 |---|---|---|
-| Drehzahl | 010C | jeder Zyklus |
+| Drehzahl | 010C (für den Schaltblitz) | jeder Zyklus |
 | Saugrohrdruck (MAP) | 0187 (1/32 kPa, bis 2048 kPa), falls das Auto es kennt; sonst 010B (1 Byte, max. 255 kPa ≈ +1,55 bar Ladedruck) | jeder Zyklus |
 | Batteriespannung | ATRV (misst der ELM327 selbst) | 1 s |
-| Kühlwasser | 0105 | 1 s |
+| Kühlwasser | 0105 (für die Öl-Suche) | 1 s |
+| Zündwinkel | 010E: A/2 − 64 ° vor OT | 250 ms |
+| Ansauglufttemperatur | 010F: A − 40 °C | 1 s |
+| Katalysatortemperatur | 013C (Bank 1, Sensor 1): (A·256+B)/10 − 40 °C | 1 s |
 | Öltemperatur | `2211BD` an das Motorsteuergerät (7E0), Formel (A·256+B)/10 − 273,1 (Kelvin/10). Fest eingebaut; eine per Öl-Suche gespeicherte andere DID hat Vorrang | 1 s |
 | Umgebungsdruck | 0133 | 10 s (Startwert 101,3 kPa, bis der erste Messwert da ist) |
+
+Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; Kat-Temperatur, Zündwinkel und Ansaugluft werden dann nach 5 Fehlversuchen nur noch alle 30 s erneut versucht.
 
 ### Hinweise zum Fabia 3 / 1.0 TSI
 
@@ -97,6 +102,7 @@ Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`)
 | `TCA9554PWR.*` | IO-Expander (LCD-/Touch-Reset, LCD-CS, Summer) |
 | `I2C_Driver.*` | I2C-Hilfsfunktionen |
 | `lv_conf.h` | LVGL-Konfiguration |
+| `font_boost_*.c` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv` |
 | `tools/sim/` | UI-Simulator für den PC (siehe unten) |
 | `tools/tests/` | PC-Test der Öl-Such-Logik (Befehl steht oben in der Datei) |
 
