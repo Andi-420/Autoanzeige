@@ -90,7 +90,11 @@ static SemaphoreHandle_t dataMutex = nullptr;
 static float gBatt = 0.0f;
 static int   gOilTemp = 0;
 static int   gCoolant = 0;
-static int   gRPM = 0;
+static int   gRPM = 0;            // Startseite zeigt sie nicht mehr, wird fuer den Schaltblitz gebraucht
+static float gCatTemp = 0.0f;     // PID 0x3C, Katalysatortemperatur Bank 1 Sensor 1 (Grad C)
+static bool  gCatOK = false;
+static float gTiming = 0.0f;      // PID 0x0E, Zuendwinkel (Grad vor OT, negativ = nach OT)
+static bool  gTimingOK = false;
 
 // Ladedruck-Berechnung: MAP (Drosselklappen-/Saugrohrdruck) - Umgebungsdruck
 static float gMapKPa = 0.0f;      // PID 0x0B, absoluter Druck nach Drosselklappe (kPa)
@@ -437,8 +441,8 @@ static void build_page_main(void) {
 
   create_tile_main(scr, 0, "SPANNUNG",   "VOLT",   110, 150);
   create_tile_main(scr, 1, "OEL-TEMP",   "GRAD C", -20, 150);
-  create_tile_main(scr, 2, "KUEHLWASSER","GRAD C", -20, 130);
-  create_tile_main(scr, 3, "DREHZAHL",   "U/MIN",  0, 8000);
+  create_tile_main(scr, 2, "KAT-TEMP",   "GRAD C", 0, 1000);
+  create_tile_main(scr, 3, "ZUENDWINKEL","GRAD V.OT", -10, 40);
 
   lbl_obd_status = lv_label_create(scr);
   lv_label_set_text(lbl_obd_status, "INIT");
@@ -463,11 +467,13 @@ static void update_tile(int idx, const char *vs, int raw, uint32_t col) {
 
 static void refresh_main(void) {
   float batt;
-  int oil, cool, rpm;
-  bool oilOk, elmOk, ecuOk;
+  int oil;
+  float cat, timing;
+  bool oilOk, catOk, timingOk, elmOk, ecuOk;
   xSemaphoreTake(dataMutex, portMAX_DELAY);
-  batt = gBatt; oil = gOilTemp; cool = gCoolant;
-  rpm = gRPM; oilOk = gOilOK; elmOk = gElmOK; ecuOk = gEcuOK;
+  batt = gBatt; oil = gOilTemp;
+  cat = gCatTemp; catOk = gCatOK; timing = gTiming; timingOk = gTimingOK;
+  oilOk = gOilOK; elmOk = gElmOK; ecuOk = gEcuOK;
   xSemaphoreGive(dataMutex);
 
   char buf[12];
@@ -482,11 +488,19 @@ static void refresh_main(void) {
   }
   update_tile(1, buf, oilOk ? oil : -20, oil_temp_color(oil, oilOk));
 
-  snprintf(buf,sizeof(buf),"%d",cool);
-  update_tile(2,buf,cool,cool>110?C_RED:cool<50?C_YELLOW:C_CYAN);
+  // Kat: unter ~300 C noch nicht auf Betriebstemperatur (cyan), normal gruen,
+  // ab 850 C sehr heiss (orange), ab 950 C kritisch (rot)
+  int ci = (int)lroundf(cat);
+  if (catOk) snprintf(buf, sizeof(buf), "%d", ci);
+  else       snprintf(buf, sizeof(buf), "N/A");
+  uint32_t cc = !catOk ? C_MUTED : ci > 950 ? C_RED : ci > 850 ? C_ORANGE : ci < 300 ? C_CYAN : C_GREEN;
+  update_tile(2, buf, catOk ? ci : 0, cc);
 
-  snprintf(buf,sizeof(buf),"%d",rpm);
-  update_tile(3,buf,rpm,rpm>6000?C_RED:rpm>4500?C_ORANGE:C_CYAN);
+  // Zuendwinkel: negativ = Zuendung nach OT (z.B. Klopfregelung / Kat-Heizen) -> orange
+  if (timingOk) snprintf(buf, sizeof(buf), "%.1f", timing);
+  else          snprintf(buf, sizeof(buf), "N/A");
+  uint32_t tc = !timingOk ? C_MUTED : timing < 0.0f ? C_ORANGE : C_CYAN;
+  update_tile(3, buf, timingOk ? (int)lroundf(timing) : -10, tc);
 
   // ELM? = Adapter antwortet nicht | ECU? = Adapter ok, Auto antwortet nicht (Zuendung aus?)
   const char *st = !elmOk ? "ELM?" : !ecuOk ? "ECU?" : "OBD OK";
@@ -1710,7 +1724,19 @@ static void probeMap87(void) {
   Serial.printf("[MAP] PID 0x87 %s\n", sMap87 ? "wird genutzt (bis 2048 kPa)" : "nicht verfuegbar, nutze 0x0B (max 255 kPa)");
 }
 
-#define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel
+// Nicht unterstuetzte PIDs nicht dauernd abfragen: nach 5 Fehlversuchen nur alle 30 s
+struct PidBackoff { uint8_t fail; uint32_t tRetry; };
+static bool pidDue(const PidBackoff &p, uint32_t now) {
+  return p.fail < 5 || now - p.tRetry >= 30000UL;
+}
+static void pidResult(PidBackoff &p, bool ok, uint32_t now) {
+  if (ok) { p.fail = 0; return; }
+  if (p.fail < 255) p.fail++;
+  p.tRetry = now;
+}
+
+#define TIMING_MS      250UL   // Zuendwinkel (aendert sich schnell, aber nicht jeden Zyklus noetig)
+#define SLOW_MS       1000UL   // Batterie, Kuehlwasser, Oel, Kat
 #define AMB_MS       10000UL   // Umgebungsdruck
 #define OIL_MAX_FAIL  5
 #define OIL_RETRY_MS 30000UL
@@ -1720,7 +1746,8 @@ static void obdTask(void *param) {
   delay(1000);
   elmInit();
 
-  uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0;
+  uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0, tTiming = 0;
+  PidBackoff boCat = {0, 0}, boTiming = {0, 0};
   uint8_t oilFail = 0;
 
   for (;;) {
@@ -1781,6 +1808,8 @@ static void obdTask(void *param) {
     float mapKPa = gMapKPa;
     float ambKPa = gAmbientKPa;
     float boostBar = gBoostBar;
+    float cat = gCatTemp, timing = gTiming;
+    bool catOk = gCatOK, timingOk = gTimingOK;
 
     uint32_t now = millis();
 
@@ -1802,6 +1831,15 @@ static void obdTask(void *param) {
     else if (obdQuery("010B", "410B", a, b))
       mapKPa = (float)a; // PID 0x0B liefert Druck direkt in kPa (0-255)
 
+    // ── Zuendwinkel: 4x pro Sekunde ────────────────────────────────
+    if (now - tTiming >= TIMING_MS && pidDue(boTiming, now)) {
+      tTiming = now;
+      bool okT = obdQuery("010E", "410E", a, b);
+      if (okT) timing = a / 2.0f - 64.0f;   // A/2 - 64 Grad vor OT
+      timingOk = okT;
+      pidResult(boTiming, okT, now);
+    }
+
     // ── Langsame Werte: ca. 1x pro Sekunde ─────────────────────────
     if (now - tSlow >= SLOW_MS) {
       tSlow = now;
@@ -1816,6 +1854,14 @@ static void obdTask(void *param) {
 
       if (obdQuery("0105", "4105", a, b))
         cool = (int)a - 40;
+
+      // Katalysatortemperatur Bank 1 Sensor 1: (A*256+B)/10 - 40 Grad C
+      if (pidDue(boCat, now)) {
+        bool okC = obdQuery("013C", "413C", a, b);
+        if (okC) cat = ((a << 8) | b) / 10.0f - 40.0f;
+        catOk = okC;
+        pidResult(boCat, okC, now);
+      }
 
       // Oel-Temperatur (PID 0x5C): viele Autos kennen diese PID nicht und
       // antworten jedes Mal mit NO DATA. Nach OIL_MAX_FAIL Fehlversuchen
@@ -1874,6 +1920,8 @@ static void obdTask(void *param) {
     gAmbientKPa = ambKPa;
     gBoostBar = boostBar;
     gOilOK = oilOk;
+    gCatTemp = cat; gCatOK = catOk;
+    gTiming = timing; gTimingOK = timingOk;
     gElmOK = elmOk;
     gEcuOK = ecuOk;
     gNewData = true;
