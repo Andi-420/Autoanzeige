@@ -39,7 +39,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | Seite | Inhalt |
 |---|---|
 | **Hauptseite** | Batteriespannung, Öltemperatur, Kühlwasser, Drehzahl. In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht) |
-| **Ladedruck / Öl** | Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Innerer Bogen: Öltemperatur. **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
+| **Ladedruck / Öl** | Großer Ladedruck-Ring außen, Öl-Ring innen, in der Mitte **BOOST** mit Wert in fetter Schrift. Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Innerer Bogen: Öltemperatur. **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
 | **Fehlercodes** | „AUSLESEN“ tippen, dann werden die gespeicherten Fehlercodes (Mode 03) angezeigt, z. B. `P0123` |
 | **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten |
 | **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** löscht die Max-Werte. **RESET lange drücken** (Auto steht still) setzt den Nullpunkt, um einen schrägen Einbau auszugleichen. Der Nullpunkt wird gespeichert |
@@ -97,6 +97,7 @@ Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`)
 | `TCA9554PWR.*` | IO-Expander (LCD-/Touch-Reset, LCD-CS, Summer) |
 | `I2C_Driver.*` | I2C-Hilfsfunktionen |
 | `lv_conf.h` | LVGL-Konfiguration |
+| `font_boost_*.c` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv` |
 | `tools/sim/` | UI-Simulator für den PC (siehe unten) |
 | `tools/tests/` | PC-Test der Öl-Such-Logik (Befehl steht oben in der Datei) |
 

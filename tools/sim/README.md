@@ -48,6 +48,7 @@ Texte erzeugen, z. B. negative Zahlen oder vierstellige Drehzahlen.
 
 ## Hinweise
 
+- `.c`-Dateien im Sketch-Ordner (z. B. die Schriften `font_boost_*.c`) werden automatisch mitgebaut.
 - Wird im Sketch eine neue Arduino- oder ESP32-Funktion benutzt, muss sie ggf. in
   `stub/Arduino.h` (oder dem passenden Stub) ergänzt werden, sonst schlägt der Build fehl.
 - Der Simulator prüft nur die Oberfläche. OBD-Kommunikation, Touch und Sensoren

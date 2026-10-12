@@ -687,7 +687,52 @@ static lv_obj_t *boost_arc = nullptr;
 static lv_obj_t *oil_arc = nullptr;
 static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
-static lv_obj_t *lbl_boost_status = nullptr;
+
+// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold, font_boost_*.c im Sketch-Ordner)
+extern "C" {
+  LV_FONT_DECLARE(font_boost_76);   // Ladedruck-Wert
+  LV_FONT_DECLARE(font_boost_40);   // Oel-Temperatur
+  LV_FONT_DECLARE(font_boost_24);   // "BOOST"
+}
+
+// Layout (Durchmesser/Breite der Ringe, vertikale Positionen relativ zur Mitte)
+#define BOOST_RING_D  424
+#define BOOST_RING_W   30
+#define OIL_RING_D    340
+#define OIL_RING_W     20
+#define BOOST_Y_TITLE (-95)
+#define BOOST_Y_VAL   (-28)
+#define BOOST_Y_UNIT   26
+#define OIL_Y_VAL      66
+#define OIL_Y_UNIT    104
+
+// Bogen 135..405 Grad (unten offen) mit dunklem Hintergrund-Bogen; liefert den Wert-Bogen
+static lv_obj_t* make_gauge(lv_obj_t *scr, int d, int w, int vmin, int vmax, uint32_t col) {
+  lv_obj_t *bg = lv_arc_create(scr);
+  lv_obj_set_size(bg, d, d); lv_obj_center(bg);
+  lv_arc_set_bg_angles(bg, 135, 405); lv_arc_set_value(bg, 100);
+  lv_obj_set_style_arc_color(bg, lv_color_hex(C_RING_BG), LV_PART_MAIN);
+  lv_obj_set_style_arc_width(bg, w, LV_PART_MAIN);
+  lv_obj_set_style_arc_rounded(bg, true, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(bg, lv_color_hex(C_RING_BG), LV_PART_INDICATOR);
+  lv_obj_set_style_arc_width(bg, w, LV_PART_INDICATOR);
+  lv_obj_set_style_bg_opa(bg, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_remove_style(bg, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(bg, LV_OBJ_FLAG_CLICKABLE);
+
+  lv_obj_t *a = lv_arc_create(scr);
+  lv_obj_set_size(a, d, d); lv_obj_center(a);
+  lv_arc_set_bg_angles(a, 135, 405);
+  lv_arc_set_range(a, vmin, vmax);
+  lv_arc_set_value(a, vmin);
+  lv_obj_set_style_arc_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);
+  lv_obj_set_style_arc_color(a, lv_color_hex(col), LV_PART_INDICATOR);
+  lv_obj_set_style_arc_width(a, w, LV_PART_INDICATOR);
+  lv_obj_set_style_arc_rounded(a, true, LV_PART_INDICATOR);
+  lv_obj_remove_style(a, NULL, LV_PART_KNOB);
+  lv_obj_clear_flag(a, LV_OBJ_FLAG_CLICKABLE);
+  return a;
+}
 
 // ── Schaltblitz (wie im Rennsport): roter Ring am Displayrand blinkt ab SHIFT_RPM ──
 #define SHIFT_RPM       3500
@@ -715,89 +760,43 @@ static void build_page_boost(void) {
   lv_obj_t *scr = make_screen();
   screens[PAGE_BOOST] = scr;
 
-  add_title(scr, "LADEDRUCK / OEL-TEMP", C_PURPLE);
+  // Kein Titel: "BOOST" steht in der Mitte, dadurch sind Ringe und Schrift groesser.
+  // Radien (px vom Mittelpunkt): Schaltblitz 223..235 | Ladedruck 182..212 | Oel 150..170
+  boost_arc = make_gauge(scr, BOOST_RING_D, BOOST_RING_W, BOOST_ARC_MIN, BOOST_ARC_MAX, C_PURPLE);
+  oil_arc   = make_gauge(scr, OIL_RING_D,   OIL_RING_W,   OIL_ARC_MIN,   OIL_ARC_MAX,   C_CYAN);
 
-  // ── Aeusserer Arc: LADEDRUCK (lila) ─────────────────────────
-  lv_obj_t *abg_boost = lv_arc_create(scr);
-  lv_obj_set_size(abg_boost, 300, 300); lv_obj_center(abg_boost);
-  lv_arc_set_bg_angles(abg_boost, 135, 405); lv_arc_set_value(abg_boost, 100);
-  lv_obj_set_style_arc_color(abg_boost, lv_color_hex(C_RING_BG), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(abg_boost, 18, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(abg_boost, lv_color_hex(C_RING_BG), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(abg_boost, 18, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(abg_boost, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_remove_style(abg_boost, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(abg_boost, LV_OBJ_FLAG_CLICKABLE);
+  // ── Mitte: BOOST + Wert + Einheit ─────────────────────────────
+  lv_obj_t *lb = lv_label_create(scr);
+  lv_label_set_text(lb, "BOOST");
+  lv_obj_set_style_text_font(lb, &font_boost_24, 0);
+  lv_obj_set_style_text_color(lb, lv_color_hex(C_PURPLE), 0);
+  lv_obj_set_style_text_letter_space(lb, 3, 0);
+  lv_obj_align(lb, LV_ALIGN_CENTER, 0, BOOST_Y_TITLE);
 
-  boost_arc = lv_arc_create(scr);
-  lv_obj_set_size(boost_arc, 300, 300); lv_obj_center(boost_arc);
-  lv_arc_set_bg_angles(boost_arc, 135, 405);
-  lv_arc_set_range(boost_arc, BOOST_ARC_MIN, BOOST_ARC_MAX);
-  lv_arc_set_value(boost_arc, 0);
-  lv_obj_set_style_arc_color(boost_arc, lv_color_hex(0x111122), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(boost_arc, 1, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(boost_arc, lv_color_hex(C_PURPLE), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(boost_arc, 18, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_rounded(boost_arc, true, LV_PART_INDICATOR);
-  lv_obj_remove_style(boost_arc, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(boost_arc, LV_OBJ_FLAG_CLICKABLE);
-
-  // ── Innerer, paralleler Arc: OEL-TEMPERATUR ─────────────────
-  lv_obj_t *abg_oil = lv_arc_create(scr);
-  lv_obj_set_size(abg_oil, 226, 226); lv_obj_center(abg_oil);
-  lv_arc_set_bg_angles(abg_oil, 135, 405); lv_arc_set_value(abg_oil, 100);
-  lv_obj_set_style_arc_color(abg_oil, lv_color_hex(C_RING_BG), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(abg_oil, 16, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(abg_oil, lv_color_hex(C_RING_BG), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(abg_oil, 16, LV_PART_INDICATOR);
-  lv_obj_set_style_bg_opa(abg_oil, LV_OPA_TRANSP, LV_PART_MAIN);
-  lv_obj_remove_style(abg_oil, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(abg_oil, LV_OBJ_FLAG_CLICKABLE);
-
-  oil_arc = lv_arc_create(scr);
-  lv_obj_set_size(oil_arc, 226, 226); lv_obj_center(oil_arc);
-  lv_arc_set_bg_angles(oil_arc, 135, 405);
-  lv_arc_set_range(oil_arc, OIL_ARC_MIN, OIL_ARC_MAX);
-  lv_arc_set_value(oil_arc, 0);
-  lv_obj_set_style_arc_color(oil_arc, lv_color_hex(0x111122), LV_PART_MAIN);
-  lv_obj_set_style_arc_width(oil_arc, 1, LV_PART_MAIN);
-  lv_obj_set_style_arc_color(oil_arc, lv_color_hex(C_CYAN), LV_PART_INDICATOR);
-  lv_obj_set_style_arc_width(oil_arc, 16, LV_PART_INDICATOR);
-  lv_obj_set_style_arc_rounded(oil_arc, true, LV_PART_INDICATOR);
-  lv_obj_remove_style(oil_arc, NULL, LV_PART_KNOB);
-  lv_obj_clear_flag(oil_arc, LV_OBJ_FLAG_CLICKABLE);
-
-  // ── Ladedruck-Anzeige ────────────────────────────────────────
   lbl_boost_val = lv_label_create(scr);
-  lv_label_set_text(lbl_boost_val, "--");
-  lv_obj_set_style_text_font(lbl_boost_val, &lv_font_montserrat_40, 0);
+  lv_label_set_text(lbl_boost_val, "-.--");
+  lv_obj_set_style_text_font(lbl_boost_val, &font_boost_76, 0);
   lv_obj_set_style_text_color(lbl_boost_val, lv_color_hex(C_PURPLE), 0);
-  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, -34);
+  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, BOOST_Y_VAL);
 
   lv_obj_t *lu = lv_label_create(scr);
-  lv_label_set_text(lu, "bar (Ladedruck)");
-  lv_obj_set_style_text_font(lu, &lv_font_montserrat_14, 0);
+  lv_label_set_text(lu, "bar");
+  lv_obj_set_style_text_font(lu, &lv_font_montserrat_16, 0);
   lv_obj_set_style_text_color(lu, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lu, LV_ALIGN_CENTER, 0, 4);
+  lv_obj_align(lu, LV_ALIGN_CENTER, 0, BOOST_Y_UNIT);
 
-  // ── Oel-Temperatur-Anzeige ───────────────────────────────────
+  // ── Oel-Temperatur darunter ──────────────────────────────────
   lbl_oil_val = lv_label_create(scr);
   lv_label_set_text(lbl_oil_val, "--");
-  lv_obj_set_style_text_font(lbl_oil_val, &lv_font_montserrat_32, 0);
+  lv_obj_set_style_text_font(lbl_oil_val, &font_boost_40, 0);
   lv_obj_set_style_text_color(lbl_oil_val, lv_color_hex(C_CYAN), 0);
-  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, 44);
+  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, OIL_Y_VAL);
 
   lv_obj_t *lu2 = lv_label_create(scr);
-  lv_label_set_text(lu2, "Grad C (Oel)");
+  lv_label_set_text(lu2, "OEL  GRAD C");
   lv_obj_set_style_text_font(lu2, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(lu2, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lu2, LV_ALIGN_CENTER, 0, 76);
-
-  lbl_boost_status = lv_label_create(scr);
-  lv_label_set_text(lbl_boost_status, "MAP - Umgebungsdruck");
-  lv_obj_set_style_text_font(lbl_boost_status, &lv_font_montserrat_12, 0);
-  lv_obj_set_style_text_color(lbl_boost_status, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lbl_boost_status, LV_ALIGN_CENTER, 0, 100);
+  lv_obj_align(lu2, LV_ALIGN_CENTER, 0, OIL_Y_UNIT);
 
   // Schaltblitz-Ring ganz aussen (Radius ca. 223..235 px), liegt ausserhalb aller Anzeigen
   shift_ring = lv_arc_create(scr);
@@ -838,7 +837,7 @@ static void refresh_boost(void) {
   char buf[16];
   snprintf(buf, sizeof(buf), "%+.2f", boostBar);
   lv_label_set_text(lbl_boost_val, buf);
-  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, -34);
+  lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, BOOST_Y_VAL);
 
   int boostArcVal = (int)roundf(boostBar * 100.0f); // bar -> centibar
   boostArcVal = constrain(boostArcVal, BOOST_ARC_MIN, BOOST_ARC_MAX);
@@ -860,7 +859,7 @@ static void refresh_boost(void) {
     snprintf(buf, sizeof(buf), "N/A");
   }
   lv_label_set_text(lbl_oil_val, buf);
-  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, 44);
+  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, OIL_Y_VAL);
 
   int oilArcVal = oilOk ? constrain(oil, OIL_ARC_MIN, OIL_ARC_MAX) : OIL_ARC_MIN;
   lv_arc_set_value(oil_arc, oilArcVal);
