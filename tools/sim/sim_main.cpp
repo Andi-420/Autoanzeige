@@ -42,7 +42,7 @@ int main(){
   gMpuOK=true;
   build_page_dtc(); build_page_main(); build_page_brightness(); build_page_boost(); build_page_accel(); build_page_oilscan();
   // Beispieldaten (Worst Case fuer Textbreiten)
-  gBatt=14.4f; gOilTemp=105; gCatTemp=742; gCatOK=true; gTiming=-3.5f; gTimingOK=true; gOilOK=true; gCoolant=90; gRPM=6500; gBoostBar=1.85f; gElmOK=gEcuOK=true;
+  gBatt=14.4f; gOilTemp=105; gCatTemp=742; gCatOK=true; gTiming=-3.5f; gTimingOK=true; gIntakeTemp=54; gIntakeOK=true; gOilOK=true; gCoolant=90; gRPM=6500; gBoostBar=1.85f; gElmOK=gEcuOK=true;
   gAz=-0.45f; gAy=0.62f; gAxMax=-0.9f; gAyMax=0.8f;
   dtcCount=3; dtcList[0]="P0123"; dtcList[1]="U0100"; dtcList[2]="P0420"; gDtcState=DTC_DONE;
   // Oel-Suche: Live-Phase mit Beispiel-Kandidaten

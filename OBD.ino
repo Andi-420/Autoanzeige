@@ -95,6 +95,8 @@ static float gCatTemp = 0.0f;     // PID 0x3C, Katalysatortemperatur Bank 1 Sens
 static bool  gCatOK = false;
 static float gTiming = 0.0f;      // PID 0x0E, Zuendwinkel (Grad vor OT, negativ = nach OT)
 static bool  gTimingOK = false;
+static int   gIntakeTemp = 0;     // PID 0x0F, Ansauglufttemperatur (Grad C)
+static bool  gIntakeOK = false;
 
 // Ladedruck-Berechnung: MAP (Drosselklappen-/Saugrohrdruck) - Umgebungsdruck
 static float gMapKPa = 0.0f;      // PID 0x0B, absoluter Druck nach Drosselklappe (kPa)
@@ -701,6 +703,7 @@ static lv_obj_t *boost_arc = nullptr;
 static lv_obj_t *oil_arc = nullptr;
 static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
+static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
 
 // Fette Schriften nur fuer diese Seite (Montserrat ExtraBold, font_boost_*.c im Sketch-Ordner)
 extern "C" {
@@ -719,6 +722,7 @@ extern "C" {
 #define BOOST_Y_UNIT   26
 #define OIL_Y_VAL      66
 #define OIL_Y_UNIT    104
+#define SMALL_X        55   // Oel links (-55), Ansaugluft rechts (+55)
 
 // Bogen 135..405 Grad (unten offen) mit dunklem Hintergrund-Bogen; liefert den Wert-Bogen
 static lv_obj_t* make_gauge(lv_obj_t *scr, int d, int w, int vmin, int vmax, uint32_t col) {
@@ -804,13 +808,26 @@ static void build_page_boost(void) {
   lv_label_set_text(lbl_oil_val, "--");
   lv_obj_set_style_text_font(lbl_oil_val, &font_boost_40, 0);
   lv_obj_set_style_text_color(lbl_oil_val, lv_color_hex(C_CYAN), 0);
-  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, OIL_Y_VAL);
+  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, -SMALL_X, OIL_Y_VAL);
 
   lv_obj_t *lu2 = lv_label_create(scr);
-  lv_label_set_text(lu2, "OEL  GRAD C");
+  lv_label_set_text(lu2, "OEL C");
   lv_obj_set_style_text_font(lu2, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(lu2, lv_color_hex(C_MUTED), 0);
-  lv_obj_align(lu2, LV_ALIGN_CENTER, 0, OIL_Y_UNIT);
+  lv_obj_align(lu2, LV_ALIGN_CENTER, -SMALL_X, OIL_Y_UNIT);
+
+  // ── Ansauglufttemperatur rechts daneben (gleiche Groesse wie Oel) ──
+  lbl_iat_val = lv_label_create(scr);
+  lv_label_set_text(lbl_iat_val, "--");
+  lv_obj_set_style_text_font(lbl_iat_val, &font_boost_40, 0);
+  lv_obj_set_style_text_color(lbl_iat_val, lv_color_hex(C_CYAN), 0);
+  lv_obj_align(lbl_iat_val, LV_ALIGN_CENTER, SMALL_X, OIL_Y_VAL);
+
+  lv_obj_t *lu3 = lv_label_create(scr);
+  lv_label_set_text(lu3, "ANSAUG C");
+  lv_obj_set_style_text_font(lu3, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(lu3, lv_color_hex(C_MUTED), 0);
+  lv_obj_align(lu3, LV_ALIGN_CENTER, SMALL_X, OIL_Y_UNIT);
 
   // Schaltblitz-Ring ganz aussen (Radius ca. 223..235 px), liegt ausserhalb aller Anzeigen
   shift_ring = lv_arc_create(scr);
@@ -873,7 +890,7 @@ static void refresh_boost(void) {
     snprintf(buf, sizeof(buf), "N/A");
   }
   lv_label_set_text(lbl_oil_val, buf);
-  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, 0, OIL_Y_VAL);
+  lv_obj_align(lbl_oil_val, LV_ALIGN_CENTER, -SMALL_X, OIL_Y_VAL);
 
   int oilArcVal = oilOk ? constrain(oil, OIL_ARC_MIN, OIL_ARC_MAX) : OIL_ARC_MIN;
   lv_arc_set_value(oil_arc, oilArcVal);
@@ -881,6 +898,20 @@ static void refresh_boost(void) {
   uint32_t oilCol = oil_temp_color(oil, oilOk);
   lv_obj_set_style_arc_color(oil_arc, lv_color_hex(oilCol), LV_PART_INDICATOR);
   lv_obj_set_style_text_color(lbl_oil_val, lv_color_hex(oilCol), 0);
+
+  // ── Ansauglufttemperatur ──────────────────────────────────────
+  // Nach dem Ladeluftkuehler normal ca. Aussentemperatur + 10..30 C;
+  // Hitzestau (Stau, mehrfach Vollgas) -> gelb ab 50 C, rot ab 65 C
+  int iat; bool iatOk;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  iat = gIntakeTemp; iatOk = gIntakeOK;
+  xSemaphoreGive(dataMutex);
+  if (iatOk) snprintf(buf, sizeof(buf), "%d", iat);
+  else       snprintf(buf, sizeof(buf), "N/A");
+  lv_label_set_text(lbl_iat_val, buf);
+  lv_obj_align(lbl_iat_val, LV_ALIGN_CENTER, SMALL_X, OIL_Y_VAL);
+  uint32_t iatCol = !iatOk ? C_MUTED : iat >= 65 ? C_RED : iat >= 50 ? C_YELLOW : C_CYAN;
+  lv_obj_set_style_text_color(lbl_iat_val, lv_color_hex(iatCol), 0);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -1747,7 +1778,7 @@ static void obdTask(void *param) {
   elmInit();
 
   uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0, tTiming = 0;
-  PidBackoff boCat = {0, 0}, boTiming = {0, 0};
+  PidBackoff boCat = {0, 0}, boTiming = {0, 0}, boIat = {0, 0};
   uint8_t oilFail = 0;
 
   for (;;) {
@@ -1810,6 +1841,7 @@ static void obdTask(void *param) {
     float boostBar = gBoostBar;
     float cat = gCatTemp, timing = gTiming;
     bool catOk = gCatOK, timingOk = gTimingOK;
+    int iat = gIntakeTemp; bool iatOk = gIntakeOK;
 
     uint32_t now = millis();
 
@@ -1854,6 +1886,14 @@ static void obdTask(void *param) {
 
       if (obdQuery("0105", "4105", a, b))
         cool = (int)a - 40;
+
+      // Ansauglufttemperatur: A - 40 Grad C
+      if (pidDue(boIat, now)) {
+        bool okI = obdQuery("010F", "410F", a, b);
+        if (okI) iat = (int)a - 40;
+        iatOk = okI;
+        pidResult(boIat, okI, now);
+      }
 
       // Katalysatortemperatur Bank 1 Sensor 1: (A*256+B)/10 - 40 Grad C
       if (pidDue(boCat, now)) {
@@ -1922,6 +1962,7 @@ static void obdTask(void *param) {
     gOilOK = oilOk;
     gCatTemp = cat; gCatOK = catOk;
     gTiming = timing; gTimingOK = timingOk;
+    gIntakeTemp = iat; gIntakeOK = iatOk;
     gElmOK = elmOk;
     gEcuOK = ecuOk;
     gNewData = true;
