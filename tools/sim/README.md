@@ -49,7 +49,7 @@ Texte erzeugen, z. B. negative Zahlen oder vierstellige Drehzahlen.
 ## Hinweise
 
 - Wie die Arduino IDE setzt der Simulator automatisch Funktions-Prototypen vor die erste Funktion (`arduino_proto.py`). Dadurch fallen Fehler wie „'X' does not name a type“ schon am PC auf: Eigene Typen, die in Funktionsparametern vorkommen, müssen vor der ersten Funktion definiert sein.
-- `.c`-Dateien im Sketch-Ordner (z. B. die Schriften `font_boost_*.c`) werden automatisch mitgebaut.
+- `.c`-Dateien im Sketch-Ordner werden automatisch mitgebaut.
 - Wird im Sketch eine neue Arduino- oder ESP32-Funktion benutzt, muss sie ggf. in
   `stub/Arduino.h` (oder dem passenden Stub) ergänzt werden, sonst schlägt der Build fehl.
 - Der Simulator prüft nur die Oberfläche. OBD-Kommunikation, Touch und Sensoren
