@@ -141,6 +141,12 @@ static volatile int gScanCmd = SCMD_NONE;
 
 #define OIL_MAX_HITS  1200
 #define OIL_MAX_CANDS 5
+// HINWEIS: Eigene Typen, die als Funktionsparameter vorkommen, muessen VOR der
+// ersten Funktion im Sketch stehen. Die Arduino IDE setzt automatisch erzeugte
+// Funktions-Prototypen vor die erste Funktion - ein spaeter definierter Typ
+// fuehrt dort zu "does not name a type".
+struct PidBackoff { uint8_t fail; uint32_t tRetry; };   // Backoff fuer nicht unterstuetzte PIDs
+
 struct ScanStatus {                 // unter Mutex
   int     phase;
   int     hits;
@@ -1756,7 +1762,7 @@ static void probeMap87(void) {
 }
 
 // Nicht unterstuetzte PIDs nicht dauernd abfragen: nach 5 Fehlversuchen nur alle 30 s
-struct PidBackoff { uint8_t fail; uint32_t tRetry; };
+// (struct PidBackoff steht oben bei den globalen Variablen, siehe Hinweis dort)
 static bool pidDue(const PidBackoff &p, uint32_t now) {
   return p.fail < 5 || now - p.tRetry >= 30000UL;
 }

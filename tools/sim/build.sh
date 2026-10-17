@@ -36,7 +36,8 @@ if [ ! -f "$B/liblvgl.a" ]; then
 fi
 
 # 4) Sketch + Simulator bauen und ausfuehren
-cp "$ROOT/OBD.ino" "$B/sketch.cpp"
+# Wie die Arduino IDE: Funktions-Prototypen vor die erste Funktion setzen
+python3 "$SIM/arduino_proto.py" "$ROOT/OBD.ino" "$B/sketch.cpp"
 # C-Dateien im Sketch-Ordner (z.B. eigene Schriften font_*.c) mitbauen
 EXTRA_OBJ=""
 for c in "$ROOT"/*.c; do
