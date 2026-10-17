@@ -21,7 +21,7 @@ Gedacht für einen **Skoda Fabia 3 mit 1.0 TSI** (CAN-Bus).
   - **FastIMU** (1.2.6, für den QMI8658)
 - `lv_conf.h` liegt im Sketch-Ordner (siehe Kommentar in der Datei)
 - Die Arduino IDE verlangt, dass der Ordner genauso heißt wie der Sketch: `OBD.ino` muss in einem Ordner `OBD` liegen
-- **Alle Dateien aus dem Repo** gehören in diesen Ordner (nicht nur `OBD.ino`): `OilScan.h`, `font_boost_*.h`, die Treiber `*.cpp/*.h`. Am einfachsten: Repo als ZIP herunterladen (GitHub → Code → Download ZIP) und den Inhalt nach `OBD\` entpacken
+- **Alle Dateien aus dem Repo** gehören in diesen Ordner (nicht nur `OBD.ino`): `OilScan.h`, `font_boost_*.c`, die Treiber `*.cpp/*.h`. Am einfachsten: Repo als ZIP herunterladen (GitHub → Code → Download ZIP) und den Inhalt nach `OBD\` entpacken
 
 Architektur: Der OBD-Task läuft auf Core 0 (blockierende UART-Kommunikation), LVGL und die Anzeige auf Core 1. Die Messwerte werden über einen Mutex ausgetauscht.
 
@@ -68,6 +68,27 @@ Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; K
 - Das Protokoll wird automatisch erkannt (`ATSP0`, dann `ATDPN`). Startet die Anzeige vor der Zündung, ist es zunächst unbekannt und wird nachgeholt, sobald das Auto antwortet. Erst dann wird auf `7E0` umgeschaltet (vorher blieb die Öltemperatur in diesem Fall bis zum Neustart auf `N/A`). Die Fehlercode-Auswertung kann auch Antworten verarbeiten, die über mehrere CAN-Frames verteilt kommen.
 - Wenn der Adapter nicht mehr antwortet (3 leere Antworten hintereinander), wird er automatisch neu initialisiert.
 
+## Schlafmodus (dauerhaft am OBD-Stecker)
+
+Damit die Anzeige am OBD-Stecker bleiben kann, ohne die Batterie leerzuziehen:
+
+- **Einschlafen**, wenn alle Bedingungen erfüllt sind:
+  - das Steuergerät antwortet **3 Minuten** lang nicht (Zündung aus), Start-Stopp ist also kein Problem,
+  - die Spannung liegt unter **13,0 V** (Lichtmaschine lädt nicht),
+  - das Display wurde **2 Minuten** nicht angetippt,
+  - keine Öl-Suche läuft.
+
+  In den letzten 30 Sekunden steht auf der Hauptseite `SCHLAF 25s`; Antippen verschiebt den Schlaf.
+  Dann: Hintergrundlicht und Panel aus, Touch stromsparend, ELM327 per `AT LP` in den Stromsparmodus, ESP32 in den Deep Sleep.
+- **Aufwachen:**
+  - alle **30 s** kurze Prüfung ohne Display (ca. 1,5–2,5 s): Spannung **≥ 13,2 V** oder **Drehzahl > 0** → normaler Start;
+  - **Antippen** des Displays weckt sofort;
+  - unter **12,0 V** wird nur noch alle **10 min** geprüft (Batterieschutz).
+- Alle Schwellen stehen oben in `OBD.ino` (`SLEEP_AFTER_MS`, `WAKE_VOLT`, `WAKE_CHECK_S` …).
+- Im seriellen Monitor: `[SLEEP] …` beim Einschlafen, `[WAKE] Grund …, Prüfungen im Schlaf: …` beim Start.
+- **Grenzen:** Der ELM327 hängt direkt an 12 V. Nachbauten setzen `AT LP` oft nicht um und ziehen weiter Strom. Auch der 12→5-V-Wandler hat einen Ruhestrom.
+  Die tatsächliche Entladung also am besten einmal messen. Die Spannungsprüfung nutzt `ATRV` des ELM; misst der falsch (zu hoch), schläft die Anzeige nicht ein.
+
 ## Öl-Suche (herstellerspezifische Öltemperatur)
 
 Das Motorsteuergerät kennt die Öltemperatur, aber nur unter einer herstellerspezifischen
@@ -103,7 +124,7 @@ Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`)
 | `TCA9554PWR.*` | IO-Expander (LCD-/Touch-Reset, LCD-CS, Summer) |
 | `I2C_Driver.*` | I2C-Hilfsfunktionen |
 | `lv_conf.h` | LVGL-Konfiguration |
-| `font_boost_*.h` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv`, per `#include` in `OBD.ino` eingebunden |
+| `font_boost_*.c` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv`. Müssen als C (nicht C++) übersetzt werden |
 | `tools/sim/` | UI-Simulator für den PC (siehe unten) |
 | `tools/tests/` | PC-Test der Öl-Such-Logik (Befehl steht oben in der Datei) |
 

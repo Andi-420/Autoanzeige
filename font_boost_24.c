@@ -1,8 +1,6 @@
 /*******************************************************************************
  * Size: 24 px
  * Bpp: 4
- * Wird von OBD.ino per #include eingebunden (kein eigenes .c, damit ein
- * fehlendes File einen klaren Fehler gibt statt 'undefined reference').
  * Montserrat ExtraBold (800), Zeichen: "BOSTELCbar "
  * Quelle: Google Fonts, Lizenz: SIL Open Font License 1.1
  * Erzeugt mit: lv_font_conv --font Montserrat-ExtraBold.ttf --size 24 --bpp 4 --no-compress --symbols "BOSTELCbar "

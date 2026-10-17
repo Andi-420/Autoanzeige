@@ -31,6 +31,8 @@
 // QMI8658 via FastIMU library (Arduino Library Manager: "FastIMU" v1.2.6)
 #include <FastIMU.h>
 #include <Preferences.h>
+#include "esp_sleep.h"
+#include "driver/rtc_io.h"
 #include "TCA9554PWR.h"
 #include "Display_ST7701.h"
 #include "Touch_CST820.h"
@@ -141,6 +143,31 @@ static volatile int gScanCmd = SCMD_NONE;
 
 #define OIL_MAX_HITS  1200
 #define OIL_MAX_CANDS 5
+// ── Schlafmodus (Board bleibt dauerhaft am OBD-Stecker) ────────────
+// Einschlafen: Steuergeraet antwortet SLEEP_AFTER_MS lang nicht (Zuendung aus),
+//   Spannung unter SLEEP_VOLT_MAX (Lichtmaschine laedt nicht) und kein Touch.
+//   Start-Stopp ist unkritisch: bei Zuendung an antwortet das Steuergeraet weiter.
+// Aufwachen: alle WAKE_CHECK_S kurz pruefen -> Spannung >= WAKE_VOLT ODER Drehzahl > 0
+//   => normal starten. Antippen des Displays weckt sofort.
+#define SLEEP_AFTER_MS    180000UL   // 3 min ohne Antwort vom Steuergeraet
+#define SLEEP_TOUCH_MS    120000UL   // nach dem letzten Antippen mind. 2 min wach bleiben
+#define SLEEP_VOLT_MAX    13.0f      // darueber laedt die Lichtmaschine -> nicht schlafen
+#define WAKE_VOLT         13.2f      // ab hier gilt "Motor laeuft"
+#define WAKE_CHECK_S      30         // Pruefintervall im Schlaf
+#define LOWBATT_VOLT      12.0f      // Batterie schwach ...
+#define LOWBATT_CHECK_S   600        // ... dann nur alle 10 min pruefen
+#define LCD_BL_GPIO       GPIO_NUM_6 // Hintergrundlicht (LCD_BL_PIN), im Schlaf fest auf LOW
+#define TOUCH_INT_GPIO    GPIO_NUM_16// CST820_INT_PIN, Weckquelle
+
+// Ueberleben den Deep Sleep (RTC-Speicher)
+RTC_DATA_ATTR static char  rtcProto = 0;      // zuletzt erkanntes ELM-Protokoll ('6' usw.), 0 = unbekannt
+RTC_DATA_ATTR static float rtcBatt = 0.0f;    // letzte gemessene Spannung
+RTC_DATA_ATTR static uint32_t rtcChecks = 0;  // Anzahl Weck-Pruefungen seit dem Einschlafen
+
+static volatile uint32_t gLastTouchMs = 0;    // LVGL-Task schreibt, OBD-Task liest
+static volatile bool gSleepNow = false;       // OBD-Task -> LVGL-Task: jetzt einschlafen
+static volatile int  gSleepIn = -1;           // Sekunden bis zum Schlaf (Anzeige), -1 = nicht geplant
+
 // HINWEIS: Eigene Typen, die als Funktionsparameter vorkommen, muessen VOR der
 // ersten Funktion im Sketch stehen. Die Arduino IDE setzt automatisch erzeugte
 // Funktions-Prototypen vor die erste Funktion - ein spaeter definierter Typ
@@ -254,6 +281,7 @@ static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
   Touch_interrupts = false;
   if (!Touch_Read_Data()) touch_data.points = 0;
   wasPressed = touch_data.points > 0;
+  if (wasPressed) gLastTouchMs = millis();   // Bedienung haelt die Anzeige wach
 
   // ── Gesten-Navigation ────────────────────────────────────────────
   // Layout:            [Helligkeit]
@@ -513,6 +541,12 @@ static void refresh_main(void) {
   // ELM? = Adapter antwortet nicht | ECU? = Adapter ok, Auto antwortet nicht (Zuendung aus?)
   const char *st = !elmOk ? "ELM?" : !ecuOk ? "ECU?" : "OBD OK";
   uint32_t stCol = !elmOk ? C_RED : !ecuOk ? C_YELLOW : C_GREEN;
+  char sl[24];
+  int sleepIn = gSleepIn;
+  if (sleepIn >= 0) {             // kurz vor dem Schlaf: Countdown, Antippen verschiebt ihn
+    snprintf(sl, sizeof(sl), "SCHLAF %ds", sleepIn);
+    st = sl; stCol = C_MUTED;
+  }
   lv_label_set_text(lbl_obd_status, st);
   lv_obj_set_style_text_color(lbl_obd_status, lv_color_hex(stCol), 0);
   lv_obj_align(lbl_obd_status, LV_ALIGN_CENTER, 0, 0);
@@ -711,11 +745,20 @@ static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
 
-// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold). Die Dateien
-// font_boost_*.h muessen im Sketch-Ordner neben OBD.ino liegen.
-#include "font_boost_76.h"   // Ladedruck-Wert
-#include "font_boost_40.h"   // Oel- und Ansauglufttemperatur
-#include "font_boost_24.h"   // "BOOST"
+// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold).
+// Sie liegen als .c-Dateien im Sketch-Ordner (C, nicht C++: der Schriftkonverter
+// schreibt die Felder in einer Reihenfolge, die C++ nicht akzeptiert).
+// Fehlt eine Datei, soll ein klarer Fehler kommen statt "undefined reference":
+#if defined(__has_include)
+  #if !__has_include("font_boost_76.c") || !__has_include("font_boost_40.c") || !__has_include("font_boost_24.c")
+    #error "font_boost_24.c / font_boost_40.c / font_boost_76.c fehlen im Sketch-Ordner - bitte alle Dateien aus dem Repo neben OBD.ino kopieren"
+  #endif
+#endif
+extern "C" {
+  LV_FONT_DECLARE(font_boost_76);   // Ladedruck-Wert
+  LV_FONT_DECLARE(font_boost_40);   // Oel- und Ansauglufttemperatur
+  LV_FONT_DECLARE(font_boost_24);   // "BOOST"
+}
 
 // Layout (Durchmesser/Breite der Ringe, vertikale Positionen relativ zur Mitte)
 #define BOOST_RING_D  424
@@ -1385,6 +1428,7 @@ static void elmDetectProto(void) {
   if (p == '0' || !isHexadecimalDigit(p)) return;
   gIsCan = (p >= '6' && p <= '9') || (p >= 'A' && p <= 'C');
   sProtoKnown = true;
+  rtcProto = p;   // fuer die schnelle Pruefung nach dem Aufwachen
   Serial.printf("[ELM] Protokoll %c (%s)\n", p, gIsCan ? "CAN" : "kein CAN");
 }
 
@@ -1777,7 +1821,45 @@ static void pidResult(PidBackoff &p, bool ok, uint32_t now) {
 #define OIL_MAX_FAIL  5
 #define OIL_RETRY_MS 30000UL
 
+// ── Schlaf-Entscheidung (im OBD-Task) ────────────────────────────
+static uint32_t sEcuAliveMs = 0;   // letzter Zeitpunkt, zu dem das Steuergeraet geantwortet hat
+
+// true = jetzt einschlafen. Setzt nebenbei den Countdown fuer die Anzeige.
+static bool sleepDue(bool ecuAlive, float batt, uint32_t now) {
+  if (ecuAlive) sEcuAliveMs = now;
+  int phase;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  phase = gScan.phase;
+  xSemaphoreGive(dataMutex);
+  uint32_t touch = gLastTouchMs;
+  bool busy = phase == SCAN_COLD || phase == SCAN_WARM;      // Oel-Suche laeuft
+  bool charging = batt > SLEEP_VOLT_MAX;                      // Lichtmaschine laedt
+  uint32_t silent = now - sEcuAliveMs;
+  bool touchRecent = touch != 0 && now - touch < SLEEP_TOUCH_MS;
+  if (busy || charging || touchRecent || silent < SLEEP_AFTER_MS - 30000UL) {
+    gSleepIn = -1;
+    return false;
+  }
+  if (silent < SLEEP_AFTER_MS) {                              // letzte 30 s: Countdown
+    gSleepIn = (int)((SLEEP_AFTER_MS - silent) / 1000) + 1;
+    return false;
+  }
+  return true;
+}
+
+// ELM327 in den Stromsparmodus und dem LVGL-Task das Einschlafen melden
+static void goSleep(float batt) {
+  Serial.printf("[SLEEP] Steuergeraet seit %lu s still, %.1f V -> Deep Sleep\n",
+                (unsigned long)((millis() - sEcuAliveMs) / 1000), batt);
+  elmSendCmd("ATLP", 500);   // Nachbauten kennen das teils nicht - dann laeuft der ELM weiter
+  rtcBatt = batt;
+  rtcChecks = 0;
+  gSleepNow = true;
+  for (;;) delay(1000);      // LVGL-Task fuehrt den Deep Sleep aus
+}
+
 static void obdTask(void *param) {
+  sEcuAliveMs = millis();    // nach dem Start erst einmal SLEEP_AFTER_MS Schonfrist
   elmSerial.begin(ELM_BAUD, SERIAL_8N1, ELM_RX, ELM_TX);
   delay(1000);
   elmInit();
@@ -1802,6 +1884,8 @@ static void obdTask(void *param) {
         gScanCmd = SCMD_NONE;
         scanStatus(SCAN_ERROR, "ELM327 nicht verbunden.");
       }
+      // Adapter antwortet gar nicht: ebenfalls nach SLEEP_AFTER_MS schlafen
+      if (sleepDue(false, rtcBatt, millis())) goSleep(rtcBatt);
       delay(5000);
       elmInit();
       sElmSilent = 0;
@@ -1954,6 +2038,8 @@ static void obdTask(void *param) {
     // ── Verbindungsstatus ─────────────────────────────────────────
     bool elmOk = sElmSilent < 3;          // 3x gar keine Antwort => Adapter weg
     bool ecuOk = elmOk && sEcuFail < 4;   // ELM da, aber Steuergeraet schweigt
+    if (batt > 1.0f) rtcBatt = batt;
+    if (sleepDue(ecuOk, batt, now)) goSleep(batt);
     if (!elmOk) Serial.println("[ELM] keine Antwort mehr -> Neuinitialisierung");
 
     xSemaphoreTake(dataMutex, portMAX_DELAY);
@@ -1978,14 +2064,87 @@ static void obdTask(void *param) {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// DEEP SLEEP
+// ══════════════════════════════════════════════════════════════════
+// Weckquellen setzen und schlafen (kehrt nicht zurueck; Aufwachen = Neustart)
+static void sleepArmAndStart(float batt) {
+  uint32_t secs = (batt > 1.0f && batt < LOWBATT_VOLT) ? LOWBATT_CHECK_S : WAKE_CHECK_S;
+  esp_sleep_enable_timer_wakeup((uint64_t)secs * 1000000ULL);
+  // Antippen: CST820 zieht INT auf LOW
+  rtc_gpio_pullup_en(TOUCH_INT_GPIO);
+  rtc_gpio_pulldown_dis(TOUCH_INT_GPIO);
+  esp_sleep_enable_ext0_wakeup(TOUCH_INT_GPIO, 0);
+  esp_deep_sleep_start();
+}
+
+// Hintergrundlicht-Pin waehrend des Schlafs (und der kurzen Pruefungen) fest auf LOW halten
+static void holdBacklightOff(void) {
+  rtc_gpio_init(LCD_BL_GPIO);
+  rtc_gpio_set_direction(LCD_BL_GPIO, RTC_GPIO_MODE_OUTPUT_ONLY);
+  rtc_gpio_set_level(LCD_BL_GPIO, 0);
+  rtc_gpio_hold_en(LCD_BL_GPIO);
+}
+
+// Aus dem laufenden Betrieb einschlafen (LVGL-Task, nachdem der OBD-Task gSleepNow gesetzt hat)
+static void enterDeepSleep(void) {
+  Serial.println("[SLEEP] Display aus, Deep Sleep");
+  LCD_Sleep();               // Hintergrundlicht + Panel aus
+  CST820_AutoSleep(true);    // Touch stromsparend, meldet Beruehrung trotzdem per INT
+  ledcDetach(LCD_BL_PIN);
+  holdBacklightOff();
+  Serial.flush();
+  sleepArmAndStart(rtcBatt);
+}
+
+// Kurze Pruefung nach dem Timer-Wecken, OHNE Display: laeuft der Motor?
+// Bedingung: Spannung >= WAKE_VOLT (Lichtmaschine laedt) ODER Drehzahl > 0.
+static bool quickEngineCheck(float &batt, int &rpm) {
+  batt = 0; rpm = 0;
+  elmSerial.begin(ELM_BAUD, SERIAL_8N1, ELM_RX, ELM_TX);
+  delay(20);
+  elmSerial.print("\r");     // weckt den ELM aus dem Stromsparmodus (AT LP)
+  delay(1100);
+  elmSendCmd("ATE0", 500); elmSendCmd("ATS0", 500); elmSendCmd("ATH0", 500);
+  float f = elmSendCmd("ATRV", 1000).toFloat();   // "12.4V" -> 12.4
+  if (f > 1.0f) batt = f;
+  if (rtcProto) {
+    // ATTP statt ATSP: probiert das Protokoll, ohne es ins EEPROM des ELM zu schreiben
+    char tp[6] = { 'A', 'T', 'T', 'P', rtcProto, 0 };
+    elmSendCmd(tp, 500);
+    uint8_t a = 0, b = 0;
+    if (elmParseOBD(elmSendCmd("010C", 1500), "410C", a, b)) rpm = ((int)a * 256 + b) / 4;
+  }
+  return batt >= WAKE_VOLT || rpm > 0;
+}
+
+// ══════════════════════════════════════════════════════════════════
 // SETUP
 // ══════════════════════════════════════════════════════════════════
 void setup() {
+  // ── Aufwachen per Timer: erst pruefen, ob der Motor laeuft ──────
+  // (ohne Serial-Wartezeit und ohne Display, damit die Pruefung kurz bleibt)
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
+    rtcChecks++;
+    float batt; int rpm;
+    if (!quickEngineCheck(batt, rpm)) {
+      if (batt > 1.0f) rtcBatt = batt;
+      elmSendCmd("ATLP", 300);
+      sleepArmAndStart(rtcBatt);   // weiter schlafen
+    }
+  }
+  // Normaler Start (Einschalten, Antippen oder Motor laeuft): Hintergrundlicht freigeben
+  rtc_gpio_hold_dis(LCD_BL_GPIO);
+  rtc_gpio_deinit(LCD_BL_GPIO);
+  rtc_gpio_deinit(TOUCH_INT_GPIO);   // Touch-INT wieder als normaler GPIO (Interrupt)
+
   Serial.begin(115200);
   uint32_t t0 = millis();
   while (!Serial && millis() - t0 < 3000);
   delay(200);
   Serial.println("\n=== OBD-II v7 ===");
+  Serial.printf("[WAKE] Grund %d (0=Einschalten, 2=Touch, 4=Timer), Pruefungen im Schlaf: %lu, letzte Spannung %.1f V\n",
+                (int)esp_sleep_get_wakeup_cause(), (unsigned long)rtcChecks, rtcBatt);
+  rtcChecks = 0;
 
   if (!psramFound()) {
     Serial.println("PSRAM fehlt!"); while (1) delay(1000);
@@ -2120,6 +2279,7 @@ static uint32_t lastMPU = 0;
 static uint32_t lastAccelUi = 0;
 
 void loop() {
+  if (gSleepNow) enterDeepSleep();   // vom OBD-Task angefordert, kehrt nicht zurueck
   lv_task_handler();
 
   bool newData = false;

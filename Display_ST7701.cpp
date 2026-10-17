@@ -206,6 +206,18 @@ void Set_Backlight(uint8_t pct) {
   ledcWrite(LCD_BL_PIN, val);
 }
 
+// Vor dem Deep Sleep: Hintergrundlicht aus, Panel aus und in den Schlafmodus
+void LCD_Sleep(void) {
+  Set_Backlight(0);
+  if (!SPI_handle) return;
+  cs_enable();
+  ST7701_CMD(0x28);              // Display Off
+  vTaskDelay(pdMS_TO_TICKS(20));
+  ST7701_CMD(0x10);              // Sleep In
+  vTaskDelay(pdMS_TO_TICKS(120));
+  cs_disable();
+}
+
 void LCD_Init(void) {
   ST7701_Reset();
   ST7701_Init();
