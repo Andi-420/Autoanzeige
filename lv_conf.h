@@ -4,6 +4,8 @@
  * Kopiere diese Datei auch nach: Arduino/libraries/lvgl/src/lv_conf.h
  */
 #if 1  /* ← auf 1 lassen! */
+#ifndef LV_CONF_H
+#define LV_CONF_H   /* sonst meldet LVGL bei jeder Datei "Possible failure to include lv_conf.h" */
 
 #define LV_COLOR_DEPTH 16          /* RGB565 — passt zum ST7701 */
 #define LV_COLOR_16_SWAP 0
@@ -15,7 +17,12 @@
 /* Memory */
 #define LV_MEM_CUSTOM 0
 #define LV_MEM_SIZE   (256 * 1024U)   /* 256 KB LVGL-Heap */
-#define LV_MEM_ADR    0               /* 0 = malloc */
+#define LV_MEM_ADR    0
+/* Den Heap beim Start aus dem PSRAM holen statt als festes Array im internen
+ * RAM: 256 KB passen dort nicht mehr neben den Rest ("DRAM segment data does
+ * not fit"). PSRAM ist ohnehin Pflicht (Board-Einstellung PSRAM: OPI). */
+#define LV_MEM_POOL_INCLUDE   <esp_heap_caps.h>
+#define LV_MEM_POOL_ALLOC(size)  heap_caps_malloc((size), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
 
 /* Tick */
 #define LV_TICK_CUSTOM       1
@@ -60,4 +67,5 @@
 /* Draw buffer */
 #define LV_DRAW_BUF_ALIGN   4
 
+#endif /* LV_CONF_H */
 #endif
