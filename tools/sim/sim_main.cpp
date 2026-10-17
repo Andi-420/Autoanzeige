@@ -10,7 +10,7 @@
 SerialC Serial; TwoWire Wire;
 uint8_t Touch_interrupts=0; CST820_Touch touch_data={0};
 uint8_t Touch_Read_Data(void){return 1;} void Touch_CST820_ISR(void){}
-void LCD_Init(void){} void Set_Backlight(uint8_t){}
+void LCD_Init(void){} void LCD_Sleep(void){} void CST820_AutoSleep(bool){} void Set_Backlight(uint8_t){}
 static uint32_t fakeMs=0; uint32_t millis(){return fakeMs;}
 static uint16_t fb[480*480];
 void LCD_DrawBitmap(uint16_t x,uint16_t y,uint16_t w,uint16_t h,uint8_t*c){

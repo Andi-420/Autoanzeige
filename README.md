@@ -68,6 +68,27 @@ Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; K
 - Das Protokoll wird automatisch erkannt (`ATSP0`, dann `ATDPN`). Startet die Anzeige vor der Zündung, ist es zunächst unbekannt und wird nachgeholt, sobald das Auto antwortet. Erst dann wird auf `7E0` umgeschaltet (vorher blieb die Öltemperatur in diesem Fall bis zum Neustart auf `N/A`). Die Fehlercode-Auswertung kann auch Antworten verarbeiten, die über mehrere CAN-Frames verteilt kommen.
 - Wenn der Adapter nicht mehr antwortet (3 leere Antworten hintereinander), wird er automatisch neu initialisiert.
 
+## Schlafmodus (dauerhaft am OBD-Stecker)
+
+Damit die Anzeige am OBD-Stecker bleiben kann, ohne die Batterie leerzuziehen:
+
+- **Einschlafen**, wenn alle Bedingungen erfüllt sind:
+  - das Steuergerät antwortet **3 Minuten** lang nicht (Zündung aus), Start-Stopp ist also kein Problem,
+  - die Spannung liegt unter **13,0 V** (Lichtmaschine lädt nicht),
+  - das Display wurde **2 Minuten** nicht angetippt,
+  - keine Öl-Suche läuft.
+
+  In den letzten 30 Sekunden steht auf der Hauptseite `SCHLAF 25s`; Antippen verschiebt den Schlaf.
+  Dann: Hintergrundlicht und Panel aus, Touch stromsparend, ELM327 per `AT LP` in den Stromsparmodus, ESP32 in den Deep Sleep.
+- **Aufwachen:**
+  - alle **30 s** kurze Prüfung ohne Display (ca. 1,5–2,5 s): Spannung **≥ 13,2 V** oder **Drehzahl > 0** → normaler Start;
+  - **Antippen** des Displays weckt sofort;
+  - unter **12,0 V** wird nur noch alle **10 min** geprüft (Batterieschutz).
+- Alle Schwellen stehen oben in `OBD.ino` (`SLEEP_AFTER_MS`, `WAKE_VOLT`, `WAKE_CHECK_S` …).
+- Im seriellen Monitor: `[SLEEP] …` beim Einschlafen, `[WAKE] Grund …, Prüfungen im Schlaf: …` beim Start.
+- **Grenzen:** Der ELM327 hängt direkt an 12 V. Nachbauten setzen `AT LP` oft nicht um und ziehen weiter Strom. Auch der 12→5-V-Wandler hat einen Ruhestrom.
+  Die tatsächliche Entladung also am besten einmal messen. Die Spannungsprüfung nutzt `ATRV` des ELM; misst der falsch (zu hoch), schläft die Anzeige nicht ein.
+
 ## Öl-Suche (herstellerspezifische Öltemperatur)
 
 Das Motorsteuergerät kennt die Öltemperatur, aber nur unter einer herstellerspezifischen
