@@ -17,9 +17,9 @@ Gedacht für einen **Skoda Fabia 3 mit 1.0 TSI** (CAN-Bus).
 - Arduino IDE mit ESP32-Core 3.x
 - Board-Einstellungen: **ESP32S3 Dev Module**, **PSRAM: OPI**, **USB CDC On Boot: Enabled**
 - Bibliotheken:
-  - **LVGL** 9.x (verwendet: 9.5; getestet im Simulator mit 9.0 – 9.5)
+  - **LVGL** 9.x (verwendet: 9.6; getestet im Simulator mit 9.0 – 9.5, auf dem ESP32-Compiler mit 9.6)
   - **FastIMU** (1.2.6, für den QMI8658)
-- `lv_conf.h` liegt im Sketch-Ordner (siehe Kommentar in der Datei)
+- `lv_conf.h` liegt im Sketch-Ordner und zusätzlich unter `Arduino/libraries/lvgl/src/` (nach jedem LVGL-Update neu dorthin kopieren). Der LVGL-Heap (256 KB) liegt im PSRAM, im internen RAM ist dafür kein Platz
 - Die Arduino IDE verlangt, dass der Ordner genauso heißt wie der Sketch: `OBD.ino` muss in einem Ordner `OBD` liegen
 - **Alle Dateien aus dem Repo** gehören in diesen Ordner (nicht nur `OBD.ino`): `OilScan.h`, `font_boost_*.c`, die Treiber `*.cpp/*.h`. Am einfachsten: Repo als ZIP herunterladen (GitHub → Code → Download ZIP) und den Inhalt nach `OBD\` entpacken
 
