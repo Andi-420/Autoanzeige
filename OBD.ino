@@ -745,11 +745,20 @@ static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
 
-// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold). Die Dateien
-// font_boost_*.h muessen im Sketch-Ordner neben OBD.ino liegen.
-#include "font_boost_76.h"   // Ladedruck-Wert
-#include "font_boost_40.h"   // Oel- und Ansauglufttemperatur
-#include "font_boost_24.h"   // "BOOST"
+// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold).
+// Sie liegen als .c-Dateien im Sketch-Ordner (C, nicht C++: der Schriftkonverter
+// schreibt die Felder in einer Reihenfolge, die C++ nicht akzeptiert).
+// Fehlt eine Datei, soll ein klarer Fehler kommen statt "undefined reference":
+#if defined(__has_include)
+  #if !__has_include("font_boost_76.c") || !__has_include("font_boost_40.c") || !__has_include("font_boost_24.c")
+    #error "font_boost_24.c / font_boost_40.c / font_boost_76.c fehlen im Sketch-Ordner - bitte alle Dateien aus dem Repo neben OBD.ino kopieren"
+  #endif
+#endif
+extern "C" {
+  LV_FONT_DECLARE(font_boost_76);   // Ladedruck-Wert
+  LV_FONT_DECLARE(font_boost_40);   // Oel- und Ansauglufttemperatur
+  LV_FONT_DECLARE(font_boost_24);   // "BOOST"
+}
 
 // Layout (Durchmesser/Breite der Ringe, vertikale Positionen relativ zur Mitte)
 #define BOOST_RING_D  424

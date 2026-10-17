@@ -21,7 +21,7 @@ Gedacht für einen **Skoda Fabia 3 mit 1.0 TSI** (CAN-Bus).
   - **FastIMU** (1.2.6, für den QMI8658)
 - `lv_conf.h` liegt im Sketch-Ordner (siehe Kommentar in der Datei)
 - Die Arduino IDE verlangt, dass der Ordner genauso heißt wie der Sketch: `OBD.ino` muss in einem Ordner `OBD` liegen
-- **Alle Dateien aus dem Repo** gehören in diesen Ordner (nicht nur `OBD.ino`): `OilScan.h`, `font_boost_*.h`, die Treiber `*.cpp/*.h`. Am einfachsten: Repo als ZIP herunterladen (GitHub → Code → Download ZIP) und den Inhalt nach `OBD\` entpacken
+- **Alle Dateien aus dem Repo** gehören in diesen Ordner (nicht nur `OBD.ino`): `OilScan.h`, `font_boost_*.c`, die Treiber `*.cpp/*.h`. Am einfachsten: Repo als ZIP herunterladen (GitHub → Code → Download ZIP) und den Inhalt nach `OBD\` entpacken
 
 Architektur: Der OBD-Task läuft auf Core 0 (blockierende UART-Kommunikation), LVGL und die Anzeige auf Core 1. Die Messwerte werden über einen Mutex ausgetauscht.
 
@@ -124,7 +124,7 @@ Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`)
 | `TCA9554PWR.*` | IO-Expander (LCD-/Touch-Reset, LCD-CS, Summer) |
 | `I2C_Driver.*` | I2C-Hilfsfunktionen |
 | `lv_conf.h` | LVGL-Konfiguration |
-| `font_boost_*.h` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv`, per `#include` in `OBD.ino` eingebunden |
+| `font_boost_*.c` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv`. Müssen als C (nicht C++) übersetzt werden |
 | `tools/sim/` | UI-Simulator für den PC (siehe unten) |
 | `tools/tests/` | PC-Test der Öl-Such-Logik (Befehl steht oben in der Datei) |
 
