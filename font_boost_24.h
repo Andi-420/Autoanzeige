@@ -1,6 +1,8 @@
 /*******************************************************************************
  * Size: 24 px
  * Bpp: 4
+ * Wird von OBD.ino per #include eingebunden (kein eigenes .c, damit ein
+ * fehlendes File einen klaren Fehler gibt statt 'undefined reference').
  * Montserrat ExtraBold (800), Zeichen: "BOSTELCbar "
  * Quelle: Google Fonts, Lizenz: SIL Open Font License 1.1
  * Erzeugt mit: lv_font_conv --font Montserrat-ExtraBold.ttf --size 24 --bpp 4 --no-compress --symbols "BOSTELCbar "
@@ -19,7 +21,7 @@
  *----------------*/
 
 /*Store the image of the glyphs*/
-static LV_ATTRIBUTE_LARGE_CONST const uint8_t glyph_bitmap[] = {
+static LV_ATTRIBUTE_LARGE_CONST const uint8_t fb24_glyph_bitmap[] = {
     /* U+0020 " " */
 
     /* U+0042 "B" */
@@ -213,7 +215,7 @@ static LV_ATTRIBUTE_LARGE_CONST const uint8_t glyph_bitmap[] = {
  *  GLYPH DESCRIPTION
  *--------------------*/
 
-static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {
+static const lv_font_fmt_txt_glyph_dsc_t fb24_glyph_dsc[] = {
     {.bitmap_index = 0, .adv_w = 0, .box_w = 0, .box_h = 0, .ofs_x = 0, .ofs_y = 0} /* id = 0 reserved */,
     {.bitmap_index = 0, .adv_w = 112, .box_w = 0, .box_h = 0, .ofs_x = 0, .ofs_y = 0},
     {.bitmap_index = 0, .adv_w = 295, .box_w = 17, .box_h = 17, .ofs_x = 1, .ofs_y = 0},
@@ -232,17 +234,17 @@ static const lv_font_fmt_txt_glyph_dsc_t glyph_dsc[] = {
  *  CHARACTER MAPPING
  *--------------------*/
 
-static const uint16_t unicode_list_0[] = {
+static const uint16_t fb24_unicode_list_0[] = {
     0x0, 0x22, 0x23, 0x25, 0x2c, 0x2f, 0x33, 0x34,
     0x41, 0x42, 0x52
 };
 
 /*Collect the unicode lists and glyph_id offsets*/
-static const lv_font_fmt_txt_cmap_t cmaps[] =
+static const lv_font_fmt_txt_cmap_t fb24_cmaps[] =
 {
     {
         .range_start = 32, .range_length = 83, .glyph_id_start = 1,
-        .unicode_list = unicode_list_0, .glyph_id_ofs_list = NULL, .list_length = 11, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY
+        .unicode_list = fb24_unicode_list_0, .glyph_id_ofs_list = NULL, .list_length = 11, .type = LV_FONT_FMT_TXT_CMAP_SPARSE_TINY
     }
 };
 
@@ -258,13 +260,13 @@ static  lv_font_fmt_txt_glyph_cache_t cache;
 #endif
 
 #if LVGL_VERSION_MAJOR >= 8
-static const lv_font_fmt_txt_dsc_t font_dsc = {
+static const lv_font_fmt_txt_dsc_t fb24_font_dsc = {
 #else
-static lv_font_fmt_txt_dsc_t font_dsc = {
+static lv_font_fmt_txt_dsc_t fb24_font_dsc = {
 #endif
-    .glyph_bitmap = glyph_bitmap,
-    .glyph_dsc = glyph_dsc,
-    .cmaps = cmaps,
+    .glyph_bitmap = fb24_glyph_bitmap,
+    .glyph_dsc = fb24_glyph_dsc,
+    .cmaps = fb24_cmaps,
     .kern_dsc = NULL,
     .kern_scale = 0,
     .cmap_num = 1,
@@ -299,7 +301,7 @@ lv_font_t font_boost_24 = {
     .underline_position = -2,
     .underline_thickness = 1,
 #endif
-    .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
+    .dsc = &fb24_font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 #if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
     .fallback = NULL,
 #endif

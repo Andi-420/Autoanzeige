@@ -711,12 +711,11 @@ static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
 
-// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold, font_boost_*.c im Sketch-Ordner)
-extern "C" {
-  LV_FONT_DECLARE(font_boost_76);   // Ladedruck-Wert
-  LV_FONT_DECLARE(font_boost_40);   // Oel-Temperatur
-  LV_FONT_DECLARE(font_boost_24);   // "BOOST"
-}
+// Fette Schriften nur fuer diese Seite (Montserrat ExtraBold). Die Dateien
+// font_boost_*.h muessen im Sketch-Ordner neben OBD.ino liegen.
+#include "font_boost_76.h"   // Ladedruck-Wert
+#include "font_boost_40.h"   // Oel- und Ansauglufttemperatur
+#include "font_boost_24.h"   // "BOOST"
 
 // Layout (Durchmesser/Breite der Ringe, vertikale Positionen relativ zur Mitte)
 #define BOOST_RING_D  424
