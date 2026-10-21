@@ -43,7 +43,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | **Ladedruck / Öl** | Großer Ladedruck-Ring außen, Öl-Ring innen, in der Mitte **BOOST** mit Wert in fetter Schrift. Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Innerer Bogen: Öltemperatur. Unter dem Ladedruck klein nebeneinander: **Öl** (links) und **Ansaugluft** (rechts; cyan, gelb ab 50 °C, rot ab 65 °C). **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
 | **Fehlercodes** | „AUSLESEN“ tippen, dann werden die gespeicherten Fehlercodes (Mode 03) angezeigt, z. B. `P0123` |
 | **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten |
-| **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** löscht die Max-Werte. **RESET lange drücken** (Auto steht still) setzt den Nullpunkt, um einen schrägen Einbau auszugleichen. Der Nullpunkt wird gespeichert |
+| **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** (Auto steht still, möglichst eben) übernimmt die momentane Lage des Geräts als neue Nullausrichtung und löscht die Max-Werte. Dabei wird die Schwerkraftrichtung gemessen und die Anzeige auf die waagerechte Längs- und Querachse umgerechnet, so dass auch ein stark schräger Einbau sauber ausgeglichen wird. Die Ausrichtung wird gespeichert und bleibt nach Neustart und Schlafmodus erhalten |
 
 ## Abgefragte Werte
 
