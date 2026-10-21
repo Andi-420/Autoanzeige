@@ -240,8 +240,20 @@ static void refresh_boost(void);
 static void refresh_accel(void);
 static void refresh_oilscan(void);
 
-static void goto_page(int idx) {
-  if (idx < 0 || idx >= PAGE_TOTAL) return;
+// Zuletzt angezeigte Seite merken (NVS), damit das Geraet beim naechsten Start
+// dort weitermacht. Die Oel-Suche zaehlt als Ladedruckseite (von dort erreichbar).
+// Nur bei Aenderung schreiben (Flash-Verschleiss).
+static void save_page(int idx) {
+  uint8_t p = (idx == PAGE_OILSCAN) ? PAGE_BOOST : (uint8_t)idx;
+  if (prefs.getUChar("page", PAGE_MAIN) != p) prefs.putUChar("page", p);
+}
+
+static int load_page(void) {
+  int p = prefs.getUChar("page", PAGE_MAIN);
+  return (p < PAGE_COUNT) ? p : PAGE_MAIN;
+}
+
+static void show_page(int idx, bool anim) {
   curPage = idx;
   // Beim Betreten sofort mit aktuellen Werten fuellen (nicht erst beim naechsten OBD-Zyklus)
   switch (idx) {
@@ -252,7 +264,14 @@ static void goto_page(int idx) {
     case PAGE_OILSCAN: refresh_oilscan(); break;
     default: break;
   }
-  lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
+  if (anim) lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
+  else      lv_screen_load(screens[idx]);
+}
+
+static void goto_page(int idx) {
+  if (idx < 0 || idx >= PAGE_TOTAL) return;
+  show_page(idx, true);
+  save_page(idx);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2309,7 +2328,7 @@ void setup() {
   build_page_accel();
   build_page_oilscan();
 
-  lv_screen_load(screens[PAGE_MAIN]);
+  show_page(load_page(), false);   // auf der zuletzt angezeigten Seite starten
   lv_task_handler();
 
   xTaskCreatePinnedToCore(

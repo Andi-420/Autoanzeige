@@ -35,7 +35,7 @@ Architektur: Der OBD-Task läuft auf Core 0 (blockierende UART-Kommunikation), L
                  [Helligkeit]
 ```
 
-Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite aus bringt beliebiges Wischen zurück zur Hauptseite. Auf der Helligkeitsseite geht das nur senkrecht, weil waagerechtes Wischen den Slider bedient.
+Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite aus bringt beliebiges Wischen zurück zur Hauptseite. Auf der Helligkeitsseite geht das nur senkrecht, weil waagerechtes Wischen den Slider bedient. Die zuletzt angezeigte Seite wird gespeichert, nach dem Einschalten oder Aufwachen startet die Anzeige wieder dort (aus der Öl-Suche heraus auf der Ladedruckseite).
 
 | Seite | Inhalt |
 |---|---|
