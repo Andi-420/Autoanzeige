@@ -76,7 +76,7 @@ Damit die Anzeige am OBD-Stecker bleiben kann, ohne die Batterie leerzuziehen:
   - das Steuergerät antwortet **3 Minuten** lang nicht (Zündung aus), Start-Stopp ist also kein Problem,
   - die Spannung liegt unter **13,0 V** (Lichtmaschine lädt nicht),
   - das Display wurde **2 Minuten** nicht angetippt,
-  - keine Öl-Suche läuft.
+  - keine Öl-Suche läuft (eine offen gelassene Live-Anzeige der Öl-Suche hält das Gerät nicht wach, sobald das Auto nicht mehr antwortet).
 
   In den letzten 30 Sekunden steht auf der Hauptseite `SCHLAF 25s`; Antippen verschiebt den Schlaf.
   Dann: Hintergrundlicht und Panel aus, Touch stromsparend, ELM327 per `AT LP` in den Stromsparmodus, ESP32 in den Deep Sleep.

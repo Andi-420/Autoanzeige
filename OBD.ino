@@ -4,8 +4,8 @@
  * FreeRTOS-Architektur: OBD-Task auf Core 0, LVGL auf Core 1
  *
  * Swipe-Navigation (von der Hauptseite aus, Gestenerkennung des CST820):
- *   SWIPE_UP    → Helligkeit (Slider)
- *   SWIPE_DOWN  → Fehlercodes (DTC)
+ *   SWIPE_UP    → Fehlercodes (DTC)
+ *   SWIPE_DOWN  → Helligkeit (Slider)
  *   SWIPE_LEFT  → Ladedruck / Oel-Temperatur
  *   SWIPE_RIGHT → Beschleunigung (QMI8658)
  *   Von jeder Unterseite: beliebig wischen → zurueck zur Hauptseite
@@ -2000,8 +2000,10 @@ static void obdTask(void *param) {
         gScanCmd = SCMD_NONE;
         scanStatus(SCAN_ERROR, "ELM327 nicht verbunden.");
       }
-      // Adapter antwortet gar nicht: ebenfalls nach SLEEP_AFTER_MS schlafen
-      if (sleepDue(false, rtcBatt, millis())) goSleep(rtcBatt);
+      // Adapter antwortet gar nicht: ebenfalls nach SLEEP_AFTER_MS schlafen.
+      // Spannung ist dann unbekannt (0) - eine alte Fahrt-Spannung (> 13 V)
+      // wuerde sonst als "Lichtmaschine laedt" gelten und den Schlaf verhindern.
+      if (sleepDue(false, 0.0f, millis())) goSleep(rtcBatt);
       delay(5000);
       elmInit();
       sElmSilent = 0;
@@ -2027,7 +2029,9 @@ static void obdTask(void *param) {
     xSemaphoreTake(dataMutex, portMAX_DELAY);
     sphase = gScan.phase;
     xSemaphoreGive(dataMutex);
-    if (sphase == SCAN_LIVE && curPage == PAGE_OILSCAN) {
+    // Nur solange das Auto antwortet: sonst normal weiter, damit die
+    // Schlaf-Pruefung laeuft (Seite offen + Zuendung aus = nie schlafen)
+    if (sphase == SCAN_LIVE && curPage == PAGE_OILSCAN && sElmSilent < 3 && sEcuFail < 4) {
       oilScanLive();
       delay(200);
       continue;
