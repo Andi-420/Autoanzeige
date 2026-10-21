@@ -154,8 +154,11 @@ static volatile int gScanCmd = SCMD_NONE;
 #define SLEEP_VOLT_MAX    13.0f      // darueber laedt die Lichtmaschine -> nicht schlafen
 #define WAKE_VOLT         13.2f      // ab hier gilt "Motor laeuft"
 #define WAKE_CHECK_S      30         // Pruefintervall im Schlaf
-#define LOWBATT_VOLT      12.0f      // Batterie schwach ...
-#define LOWBATT_CHECK_S   600        // ... dann nur alle 10 min pruefen
+#define LOWBATT_VOLT      11.0f      // Batterie schwach ...
+#define LOWBATT_CHECK_S   10800      // ... dann nur alle 3 h pruefen (Motorstart wird bis zu 3 h
+                                     //     spaeter erkannt, Antippen weckt weiter sofort).
+                                     //     Ganz abschalten geht nicht: ESP32, 12->5-V-Wandler und
+                                     //     ELM327 haengen ohne schaltbare Versorgung an Dauerplus.
 #define LCD_BL_GPIO       GPIO_NUM_6 // Hintergrundlicht (LCD_BL_PIN), im Schlaf fest auf LOW
 #define TOUCH_INT_GPIO    GPIO_NUM_16// CST820_INT_PIN, Weckquelle
 
