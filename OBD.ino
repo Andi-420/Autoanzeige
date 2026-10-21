@@ -11,8 +11,8 @@
  *   Von jeder Unterseite: beliebig wischen → zurueck zur Hauptseite
  *   (Helligkeit: nur vertikal, horizontal bedient den Slider)
  *
- * G-Meter: RESET tippen = Max-Werte loeschen,
- *          RESET lang druecken (Auto steht) = Nullpunkt setzen
+ * G-Meter: RESET tippen (Auto steht) = aktuelle Einbaulage wird neue
+ *          Nullausrichtung (dauerhaft im NVS) + Max-Werte loeschen
  *
  * ELM327: UART1, GPIO43(TX)/GPIO44(RX) + MAX232A
  * IMU:    I2C (GPIO7=SCL, GPIO15=SDA)
@@ -199,8 +199,49 @@ static volatile bool gNewDTC = false;
 static bool gMpuOK = false;
 static float gAx=0, gAy=0, gAz=0;
 static float gAxMax=0, gAyMax=0; // Max-G Werte (für GTI G-Meter)
-// Nullpunkt (Einbau-Schraeglage), per langem Druck auf RESET gesetzt, im NVS gespeichert
-static float gOffLong=0, gOffLat=0;
+// Nullausrichtung (Einbaulage), per RESET gesetzt, im NVS gespeichert.
+// gFwd/gLat sind die Sensor-Einheitsvektoren der Fahrzeug-Laengs- und
+// Querachse (waagerecht, senkrecht zur Schwerkraft). Ohne Kalibrierung:
+// Laengsachse = Sensor-Z, Querachse = Sensor-Y (Board 90 Grad gedreht verbaut).
+static float gFwd[3] = {0, 0, 1};
+static float gLat[3] = {0, 1, 0};
+static float gOffLong=0, gOffLat=0;   // nur fuer alte Nullpunkte ohne Kalibrierung
+
+static float vdot(const float *a, const float *b) { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; }
+
+// v ohne die Anteile entlang der (normierten) Achsen a und b, danach normiert
+static bool vortho(float *v, const float *a, const float *b) {
+  float da = a ? vdot(v, a) : 0, db = b ? vdot(v, b) : 0;
+  for (int i = 0; i < 3; i++) v[i] -= da * (a ? a[i] : 0) + db * (b ? b[i] : 0);
+  float n = sqrtf(vdot(v, v));
+  if (n < 0.2f) return false;   // Achse liegt (fast) parallel zur Schwerkraft
+  for (int i = 0; i < 3; i++) v[i] /= n;
+  return true;
+}
+
+// Aus dem Schwerkraftvektor (Sensor in Ruhe) die waagerechten Fahrzeugachsen
+// bestimmen: Laengsachse = Sensor-Z waagerecht projiziert, Querachse = Sensor-Y
+// senkrecht zu beiden. So bleiben Vorzeichen und Achszuordnung wie bisher,
+// aber jede Schraeglage (auch starke) wird sauber herausgerechnet.
+static bool gmeter_set_orientation(float gx, float gy, float gz) {
+  float n = sqrtf(gx*gx + gy*gy + gz*gz);
+  if (n < 0.5f || n > 1.5f) return false;   // kein plausibler Ruhewert (~1 g)
+  float down[3] = {gx/n, gy/n, gz/n};
+  float f[3] = {0, 0, 1}, l[3] = {0, 1, 0};
+  if (!vortho(f, down, nullptr)) {          // Z senkrecht? dann X als Laengsachse
+    f[0] = 1; f[1] = 0; f[2] = 0;
+    if (!vortho(f, down, nullptr)) return false;
+  }
+  if (!vortho(l, down, f)) {                // Y senkrecht? Querachse = Kreuzprodukt
+    l[0] = down[1]*f[2] - down[2]*f[1];
+    l[1] = down[2]*f[0] - down[0]*f[2];
+    l[2] = down[0]*f[1] - down[1]*f[0];
+  }
+  memcpy(gFwd, f, sizeof(f));
+  memcpy(gLat, l, sizeof(l));
+  gOffLong = 0; gOffLat = 0;
+  return true;
+}
 
 // DTC
 #define DTC_MAX 10
@@ -1252,19 +1293,20 @@ static void build_page_accel(void) {
   lv_obj_set_style_bg_color(btn, lv_color_hex(0x222244), 0);
   lv_obj_set_style_radius(btn, 6, 0);
   lv_obj_align(btn, LV_ALIGN_CENTER, 60, 154);
+  // Tippen (im stehenden Auto): aktuelle Lage wird neue Nullausrichtung
   lv_obj_add_event_cb(btn, [](lv_event_t *e){
     gAxMax = 0; gAyMax = 0;
-    if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, LV_SYMBOL_UP " MAX: 0.00G");
     if (gm_dot_max) lv_obj_align(gm_dot_max, LV_ALIGN_CENTER, 0, -20);
+    if (gmeter_set_orientation(gAx, gAy, gAz)) {
+      prefs.putFloat("calGx", gAx);
+      prefs.putFloat("calGy", gAy);
+      prefs.putFloat("calGz", gAz);
+      prefs.remove("offLong"); prefs.remove("offLat");
+      if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, "AUSRICHTUNG GESPEICHERT");
+    } else {
+      if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, LV_SYMBOL_WARNING " SENSORWERT UNGUELTIG");
+    }
   }, LV_EVENT_CLICKED, nullptr);
-  // Lang druecken (im stehenden Auto): aktuelle Lage als Nullpunkt uebernehmen
-  lv_obj_add_event_cb(btn, [](lv_event_t *e){
-    gOffLong = gAz; gOffLat = gAy;
-    prefs.putFloat("offLong", gOffLong);
-    prefs.putFloat("offLat", gOffLat);
-    gAxMax = 0; gAyMax = 0;
-    if (gm_lbl_gmax) lv_label_set_text(gm_lbl_gmax, "NULLPUNKT GESETZT");
-  }, LV_EVENT_LONG_PRESSED, nullptr);
   lv_obj_t *btn_lbl = lv_label_create(btn);
   lv_label_set_text(btn_lbl, LV_SYMBOL_REFRESH " RESET");
   lv_obj_set_style_text_font(btn_lbl, &lv_font_montserrat_12, 0);
@@ -1285,8 +1327,13 @@ static void refresh_accel(void) {
   // Links/Rechts-Achse (Y, war schon korrekt) gedreht verbaut ist -
   // die reale Vor/Zurueck-Beschleunigung erscheint dadurch auf der
   // Z-Achse des Sensors statt auf X.
-  float ax_g = gAz - gOffLong;  // Laengsachse (Bremsen/Gas) - vorher: gAx / 9.81f
-  float ay_g = gAy - gOffLat;   // Querachse  (Links/Rechts) - unveraendert, war schon korrekt
+  // Seit der Nullausrichtung per RESET: Projektion auf die kalibrierten Achsen
+  // (ohne Kalibrierung identisch zu gAz bzw. gAy).
+  const float a[3] = {gAx, gAy, gAz};
+  // Vorzeichen beider Achsen umgedreht: der Punkt lief vorher bei Gas Richtung
+  // BREMSEN und in Kurven zur falschen Seite.
+  float ax_g = -(vdot(a, gFwd) - gOffLong);  // Laengsachse (Bremsen/Gas)
+  float ay_g = -(vdot(a, gLat) - gOffLat);   // Querachse  (Links/Rechts)
 
   float ax_abs = fabsf(ax_g);
   float ay_abs = fabsf(ay_g);
@@ -2206,8 +2253,11 @@ void setup() {
   prefs.begin("obd", false);
   gBrightness = constrain(prefs.getUChar("bright", 80), 10, 100);
   Set_Backlight(gBrightness);
-  gOffLong = prefs.getFloat("offLong", 0.0f);
+  gOffLong = prefs.getFloat("offLong", 0.0f);   // alter Nullpunkt (vor Kalibrierung)
   gOffLat  = prefs.getFloat("offLat", 0.0f);
+  if (prefs.isKey("calGz"))
+    gmeter_set_orientation(prefs.getFloat("calGx", 0.0f), prefs.getFloat("calGy", 0.0f),
+                           prefs.getFloat("calGz", 0.0f));
   gOilDid  = prefs.getUShort("oilDid", OIL_DID_DEFAULT);
   gOilFml  = prefs.getUChar("oilFml", OIL_FML_DEFAULT);
   if (gOilDid == 0 || gOilFml >= OIL_FML_COUNT) { gOilDid = OIL_DID_DEFAULT; gOilFml = OIL_FML_DEFAULT; }
