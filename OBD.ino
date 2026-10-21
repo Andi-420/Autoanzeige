@@ -327,9 +327,9 @@ static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
   if (pressed || quickTap) gLastTouchMs = millis();   // Bedienung haelt die Anzeige wach
 
   // ── Gesten-Navigation ────────────────────────────────────────────
-  // Layout:            [Helligkeit]
+  // Layout:            [Fehlercodes]
   //          [Ladedruck] [MAIN] [Beschleunigung]
-  //                     [Fehlercodes]
+  //                     [Helligkeit]
   //
   // Von MAIN → Unterseiten per Swipe-Richtung
   // Von jeder UNTERSEITE → MAIN (jede Swipe-Richtung bringt zurück)
@@ -341,8 +341,8 @@ static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     bool used = true;
     if (curPage == PAGE_MAIN) {
       switch (g) {
-        case SWIPE_UP:    goto_page(PAGE_BRIGHT); break;
-        case SWIPE_DOWN:  goto_page(PAGE_DTC);    break;
+        case SWIPE_UP:    goto_page(PAGE_DTC);    break;
+        case SWIPE_DOWN:  goto_page(PAGE_BRIGHT); break;
         case SWIPE_LEFT:  goto_page(PAGE_BOOST);  break;
         case SWIPE_RIGHT: goto_page(PAGE_ACCEL);  break;
         default: used = false; break;

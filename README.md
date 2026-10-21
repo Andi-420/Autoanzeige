@@ -28,11 +28,11 @@ Architektur: Der OBD-Task läuft auf Core 0 (blockierende UART-Kommunikation), L
 ## Seiten und Bedienung
 
 ```
-                 [Helligkeit]
+                [Fehlercodes]
                       ↑
 [Ladedruck/Öl]  ←  [HAUPTSEITE]  →  [G-Meter]
                       ↓
-                [Fehlercodes]
+                 [Helligkeit]
 ```
 
 Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite aus bringt beliebiges Wischen zurück zur Hauptseite. Auf der Helligkeitsseite geht das nur senkrecht, weil waagerechtes Wischen den Slider bedient.
