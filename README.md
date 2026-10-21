@@ -83,7 +83,8 @@ Damit die Anzeige am OBD-Stecker bleiben kann, ohne die Batterie leerzuziehen:
 - **Aufwachen:**
   - alle **30 s** kurze Prüfung ohne Display (ca. 1,5–2,5 s): Spannung **≥ 13,2 V** oder **Drehzahl > 0** → normaler Start;
   - **Antippen** des Displays weckt sofort;
-  - unter **12,0 V** wird nur noch alle **10 min** geprüft (Batterieschutz).
+  - unter **11,0 V** wird nur noch alle **3 Stunden** geprüft (Batterieschutz). Ein Motorstart wird dann erst bei der nächsten Prüfung erkannt, also bis zu 3 h später; Antippen weckt weiterhin sofort.
+    Komplett abschalten kann sich das Gerät nicht: ESP32, 12→5-V-Wandler und ELM327 hängen ohne schaltbare Versorgung an Dauerplus. Dafür bräuchte es Zusatzhardware (z. B. Relais oder MOSFET mit Selbsthaltung).
 - Alle Schwellen stehen oben in `OBD.ino` (`SLEEP_AFTER_MS`, `WAKE_VOLT`, `WAKE_CHECK_S` …).
 - Im seriellen Monitor: `[SLEEP] …` beim Einschlafen, `[WAKE] Grund …, Prüfungen im Schlaf: …` beim Start.
 - **Grenzen:** Der ELM327 hängt direkt an 12 V. Nachbauten setzen `AT LP` oft nicht um und ziehen weiter Strom. Auch der 12→5-V-Wandler hat einen Ruhestrom.
