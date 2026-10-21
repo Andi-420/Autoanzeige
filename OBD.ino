@@ -1330,8 +1330,10 @@ static void refresh_accel(void) {
   // Seit der Nullausrichtung per RESET: Projektion auf die kalibrierten Achsen
   // (ohne Kalibrierung identisch zu gAz bzw. gAy).
   const float a[3] = {gAx, gAy, gAz};
-  float ax_g = vdot(a, gFwd) - gOffLong;  // Laengsachse (Bremsen/Gas)
-  float ay_g = vdot(a, gLat) - gOffLat;   // Querachse  (Links/Rechts)
+  // Vorzeichen beider Achsen umgedreht: der Punkt lief vorher bei Gas Richtung
+  // BREMSEN und in Kurven zur falschen Seite.
+  float ax_g = -(vdot(a, gFwd) - gOffLong);  // Laengsachse (Bremsen/Gas)
+  float ay_g = -(vdot(a, gLat) - gOffLat);   // Querachse  (Links/Rechts)
 
   float ax_abs = fabsf(ax_g);
   float ay_abs = fabsf(ay_g);
