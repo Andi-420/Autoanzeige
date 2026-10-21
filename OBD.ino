@@ -281,8 +281,20 @@ static void refresh_boost(void);
 static void refresh_accel(void);
 static void refresh_oilscan(void);
 
-static void goto_page(int idx) {
-  if (idx < 0 || idx >= PAGE_TOTAL) return;
+// Zuletzt angezeigte Seite merken (NVS), damit das Geraet beim naechsten Start
+// dort weitermacht. Die Oel-Suche zaehlt als Ladedruckseite (von dort erreichbar).
+// Nur bei Aenderung schreiben (Flash-Verschleiss).
+static void save_page(int idx) {
+  uint8_t p = (idx == PAGE_OILSCAN) ? PAGE_BOOST : (uint8_t)idx;
+  if (prefs.getUChar("page", PAGE_MAIN) != p) prefs.putUChar("page", p);
+}
+
+static int load_page(void) {
+  int p = prefs.getUChar("page", PAGE_MAIN);
+  return (p < PAGE_COUNT) ? p : PAGE_MAIN;
+}
+
+static void show_page(int idx, bool anim) {
   curPage = idx;
   // Beim Betreten sofort mit aktuellen Werten fuellen (nicht erst beim naechsten OBD-Zyklus)
   switch (idx) {
@@ -293,7 +305,14 @@ static void goto_page(int idx) {
     case PAGE_OILSCAN: refresh_oilscan(); break;
     default: break;
   }
-  lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
+  if (anim) lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
+  else      lv_screen_load(screens[idx]);
+}
+
+static void goto_page(int idx) {
+  if (idx < 0 || idx >= PAGE_TOTAL) return;
+  show_page(idx, true);
+  save_page(idx);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -309,51 +328,101 @@ static void lvgl_flush_cb(lv_display_t *disp,
   lv_display_flush_ready(disp);
 }
 
+static bool isSwipe(GESTURE g) { return g >= SWIPE_UP && g <= SWIPE_RIGHT; }
+
 static void lvgl_touch_cb(lv_indev_t *indev, lv_indev_data_t *data) {
   // Nur lesen, wenn der Chip einen Interrupt gemeldet hat ODER der Finger
   // zuletzt noch auflag. Sonst meldete LVGL zwischen zwei Interrupts
   // "losgelassen" => Slider-Ziehen ruckelt / Buttons loesen doppelt aus.
   static bool wasPressed = false;
+  static bool releaseNext = false;   // kurzer Tipp: im naechsten Durchlauf loslassen
+  static bool swipeDone = false;     // pro Beruehrung nur EIN Seitenwechsel
+  static uint32_t lastSwipeMs = 0;
+  static uint8_t failCount = 0;
+  static uint32_t relMs = 0;         // letztes Loslassen (Zeit + Position)
+  static uint16_t relX = 0xFFFF, relY = 0xFFFF;
+
+  data->point.x = touch_data.x;      // LVGL braucht auch beim Loslassen eine Position
+  data->point.y = touch_data.y;
+
+  if (releaseNext) {
+    releaseNext = false;
+    data->state = LV_INDEV_STATE_RELEASED;
+    return;
+  }
   if (!Touch_interrupts && !wasPressed) {
     data->state = LV_INDEV_STATE_RELEASED;
     return;
   }
 
   Touch_interrupts = false;
-  if (!Touch_Read_Data()) touch_data.points = 0;
-  wasPressed = touch_data.points > 0;
-  if (wasPressed) gLastTouchMs = millis();   // Bedienung haelt die Anzeige wach
+  if (!Touch_Read_Data()) {
+    // Einzelner I2C-Fehler: letzten Zustand halten statt mitten im Ziehen
+    // "losgelassen" zu melden. Haeuft es sich, Touch-Chip neu starten.
+    if (++failCount >= 10) {
+      Serial.println("[TOUCH] keine Antwort -> Touch-Chip neu starten");
+      failCount = 0;
+      wasPressed = false;
+      Touch_Init();
+    }
+    data->state = wasPressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+    return;
+  }
+  failCount = 0;
+  if (!wasPressed) swipeDone = false;          // neue Beruehrung beginnt
+  bool pressed = touch_data.points > 0;
+  GESTURE g = touch_data.gesture;
+  touch_data.gesture = NONE;
+  // Kurzer Tipp, der zwischen zwei Abfragen schon vorbei war: LVGL hat das
+  // Aufsetzen nie gesehen und der Tipp ginge verloren. Daher einmal "gedrueckt"
+  // an der letzten Position melden und beim naechsten Aufruf loslassen.
+  // Ein Nachzuegler-Interrupt zum eben schon gemeldeten Abheben (gleiche
+  // Position, kurz danach) ist kein neuer Tipp.
+  bool echo = touch_data.x == relX && touch_data.y == relY && millis() - relMs < 300;
+  bool quickTap = !pressed && !wasPressed && touch_data.lifted && !isSwipe(g) && !echo;
+  if ((wasPressed && !pressed) || quickTap) {
+    relMs = millis(); relX = touch_data.x; relY = touch_data.y;
+  }
+  wasPressed = pressed;
+  if (pressed || quickTap) gLastTouchMs = millis();   // Bedienung haelt die Anzeige wach
 
   // ── Gesten-Navigation ────────────────────────────────────────────
-  // Layout:            [Helligkeit]
+  // Layout:            [Fehlercodes]
   //          [Ladedruck] [MAIN] [Beschleunigung]
-  //                     [Fehlercodes]
+  //                     [Helligkeit]
   //
   // Von MAIN → Unterseiten per Swipe-Richtung
   // Von jeder UNTERSEITE → MAIN (jede Swipe-Richtung bringt zurück)
-  if (touch_data.gesture != NONE) {
+  // Nur Wischgesten wechseln die Seite: Tipp/Doppeltipp/langer Druck meldet der
+  // Chip ebenfalls als Geste und wuerde sonst Buttons auf Unterseiten "schlucken".
+  // Dieselbe Geste wird oft mehrfach gelesen -> einmal pro Beruehrung und nicht
+  // waehrend der Ueberblendung, sonst springt die Seite hin und gleich wieder zurueck.
+  if (isSwipe(g) && !swipeDone && millis() - lastSwipeMs > 400) {
+    bool used = true;
     if (curPage == PAGE_MAIN) {
-      switch (touch_data.gesture) {
-        case SWIPE_UP:    goto_page(PAGE_BRIGHT); break;
-        case SWIPE_DOWN:  goto_page(PAGE_DTC);    break;
+      switch (g) {
+        case SWIPE_UP:    goto_page(PAGE_DTC);    break;
+        case SWIPE_DOWN:  goto_page(PAGE_BRIGHT); break;
         case SWIPE_LEFT:  goto_page(PAGE_BOOST);  break;
         case SWIPE_RIGHT: goto_page(PAGE_ACCEL);  break;
-        default: break;
+        default: used = false; break;
       }
     } else if (curPage == PAGE_BRIGHT &&
-               (touch_data.gesture == SWIPE_LEFT || touch_data.gesture == SWIPE_RIGHT)) {
+               (g == SWIPE_LEFT || g == SWIPE_RIGHT)) {
       // Horizontales Wischen = Slider ziehen, NICHT zurueck zur Hauptseite
+      used = false;
     } else {
       goto_page(PAGE_MAIN);
     }
-    touch_data.gesture = NONE;
+    if (used) { swipeDone = true; lastSwipeMs = millis(); }
   }
 
   // ── Touch-Position für LVGL (Tap/Slider etc.) ────────────────────
-  if (touch_data.points > 0) {
+  data->point.x = touch_data.x;
+  data->point.y = touch_data.y;
+  if (pressed || quickTap) {
     data->state = LV_INDEV_STATE_PRESSED;
-    data->point.x = touch_data.x;
-    data->point.y = touch_data.y;
+    releaseNext = quickTap;
   } else {
     data->state = LV_INDEV_STATE_RELEASED;
   }
@@ -2298,6 +2367,9 @@ void setup() {
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, lvgl_touch_cb);
+  // Standard waere alle 33 ms; oefter abfragen, damit kurze Tipps nicht
+  // zwischen zwei Abfragen verschwinden (gelesen wird nur nach Touch-Interrupt)
+  lv_timer_set_period(lv_indev_get_read_timer(indev), 10);
 
   build_page_dtc();
   build_page_main();
@@ -2306,7 +2378,7 @@ void setup() {
   build_page_accel();
   build_page_oilscan();
 
-  lv_screen_load(screens[PAGE_MAIN]);
+  show_page(load_page(), false);   // auf der zuletzt angezeigten Seite starten
   lv_task_handler();
 
   xTaskCreatePinnedToCore(

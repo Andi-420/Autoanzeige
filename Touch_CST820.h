@@ -6,6 +6,7 @@
 #define CST820_ADDR                  0x15
 #define CST820_INT_PIN               16
 #define CST820_LCD_TOUCH_MAX_POINTS  1
+#define CST820_RES                   480   // Display 480x480, groessere Werte = Lesefehler
 
 enum GESTURE {
   NONE         = 0x00,
@@ -23,12 +24,13 @@ enum GESTURE {
 #define CST820_REG_ChipID       0xA7
 #define CST820_REG_DisAutoSleep 0xFE
 
-extern uint8_t Touch_interrupts;
+extern volatile uint8_t Touch_interrupts;
 extern struct CST820_Touch {
   uint8_t  points;
   GESTURE  gesture;
   uint16_t x;
   uint16_t y;
+  bool     lifted;   // kurzer Tipp: schon abgehoben, x/y = letzte Position
 } touch_data;
 
 uint8_t  Touch_Init(void);
