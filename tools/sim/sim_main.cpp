@@ -8,8 +8,8 @@
 #include "sketch.cpp"
 #include <vector>
 SerialC Serial; TwoWire Wire;
-uint8_t Touch_interrupts=0; CST820_Touch touch_data={0};
-uint8_t Touch_Read_Data(void){return 1;} void Touch_CST820_ISR(void){}
+volatile uint8_t Touch_interrupts=0; CST820_Touch touch_data={0};
+uint8_t Touch_Read_Data(void){return 1;} uint8_t Touch_Init(void){return 1;} void Touch_CST820_ISR(void){}
 void LCD_Init(void){} void LCD_Sleep(void){} void CST820_AutoSleep(bool){} void Set_Backlight(uint8_t){}
 static uint32_t fakeMs=0; uint32_t millis(){return fakeMs;}
 static uint16_t fb[480*480];
