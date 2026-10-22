@@ -64,6 +64,7 @@
 #define C_RING_BG 0x1C1C2C
 #define C_CYAN    0x00BFFF
 #define C_GREEN   0x00E676
+#define C_TEAL    0x00D2BA   // Tuerkisgruen, zwischen CYAN (kalt) und GREEN (warm)
 #define C_YELLOW  0xFFCC00
 #define C_ORANGE  0xFF8C00
 #define C_RED     0xFF2020
@@ -264,14 +265,14 @@ static void save_brightness(void) {
 
 // ══════════════════════════════════════════════════════════════════
 // FARBLOGIK OEL-TEMPERATUR (zentral, damit ueberall gleich)
-// -20..60 = CYAN | 60..80 = YELLOW | 80..105 = GREEN | >105 = RED
+// -20..60 = CYAN | 60..80 = TEAL | 80..105 = GREEN | >105 = RED
 // NO DATA / oilOk == false => CYAN
 // ══════════════════════════════════════════════════════════════════
 static uint32_t oil_temp_color(int oil, bool oilOk) {
   if (!oilOk) return C_CYAN;
   if (oil > 105) return C_RED;
   if (oil > 80)  return C_GREEN;
-  if (oil > 60)  return C_YELLOW;
+  if (oil > 60)  return C_TEAL;
   return C_CYAN; // -20 .. 60
 }
 
@@ -857,6 +858,9 @@ static lv_obj_t *oil_arc = nullptr;
 static lv_obj_t *lbl_boost_val = nullptr;
 static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
+static lv_obj_t *boost_max_line = nullptr; // roter Strich beim bisher hoechsten Ladedruck
+static lv_point_precise_t boostMaxPts[2];
+static int boostMaxVal = 0;               // Maximum in Centibar; gilt pro Fahrt (Deep-Sleep loescht RAM)
 
 // Fette Schriften nur fuer diese Seite (Montserrat ExtraBold).
 // Sie liegen als .c-Dateien im Sketch-Ordner (C, nicht C++: der Schriftkonverter
@@ -1004,6 +1008,15 @@ static void build_page_boost(void) {
   lv_obj_add_flag(shift_ring, LV_OBJ_FLAG_HIDDEN);
   lv_timer_create(shift_blink_cb, SHIFT_BLINK_MS, nullptr);
 
+  // Max-Strich: quer ueber den Ladedruck-Ring, Lage setzt refresh_boost()
+  boost_max_line = lv_line_create(scr);
+  lv_obj_set_pos(boost_max_line, 0, 0);
+  lv_obj_set_style_line_color(boost_max_line, lv_color_hex(C_RED), 0);
+  lv_obj_set_style_line_width(boost_max_line, 4, 0);
+  lv_obj_set_style_line_rounded(boost_max_line, true, 0);
+  lv_obj_clear_flag(boost_max_line, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_flag(boost_max_line, LV_OBJ_FLAG_HIDDEN);
+
   // Knopf zur Oel-Suche (fuer Autos ohne Standard-PID 0x5C, z.B. VAG)
   lv_obj_t *bs = make_button(scr, 130, 32, C_MUTED, "OEL-SUCHE", &lv_font_montserrat_12);
   lv_obj_align(bs, LV_ALIGN_CENTER, 0, 150);
@@ -1035,6 +1048,20 @@ static void refresh_boost(void) {
   boostArcVal = constrain(boostArcVal, BOOST_ARC_MIN, BOOST_ARC_MAX);
   lv_arc_set_value(boost_arc, boostArcVal);
 
+  // Roter Strich beim bisherigen Maximum (erst sichtbar, sobald Ueberdruck erreicht wurde)
+  if (boostArcVal > boostMaxVal) {
+    boostMaxVal = boostArcVal;
+    float ang = (135.0f + 270.0f * (boostMaxVal - BOOST_ARC_MIN) / (float)(BOOST_ARC_MAX - BOOST_ARC_MIN))
+                * (float)M_PI / 180.0f;
+    const float c = LCD_WIDTH / 2.0f;
+    const float rOut = BOOST_RING_D / 2.0f + 2.0f;
+    const float rIn  = BOOST_RING_D / 2.0f - BOOST_RING_W - 2.0f;
+    boostMaxPts[0].x = c + rIn  * cosf(ang); boostMaxPts[0].y = c + rIn  * sinf(ang);
+    boostMaxPts[1].x = c + rOut * cosf(ang); boostMaxPts[1].y = c + rOut * sinf(ang);
+    lv_line_set_points(boost_max_line, boostMaxPts, 2);
+    lv_obj_remove_flag(boost_max_line, LV_OBJ_FLAG_HIDDEN);
+  }
+
   uint32_t boostCol = boostBar > 1.0f ? C_RED
                      : boostBar > 0.5f ? C_ORANGE
                      : boostBar < 0.0f ? C_CYAN   // Unterdruck = cyan
@@ -1043,7 +1070,7 @@ static void refresh_boost(void) {
   lv_obj_set_style_text_color(lbl_boost_val, lv_color_hex(boostCol), 0);
 
   // ── Oel-Temperatur-Arc + Label ───────────────────────────────
-  // Farblogik: -20..60=CYAN | 60..80=YELLOW | 80..105=GREEN | >105=RED
+  // Farblogik: -20..60=CYAN | 60..80=TEAL | 80..105=GREEN | >105=RED
   // Bei NO DATA (oilOk==false) => CYAN
   if (oilOk) {
     snprintf(buf, sizeof(buf), "%d", oil);
