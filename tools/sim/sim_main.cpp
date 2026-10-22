@@ -55,7 +55,7 @@ int main(){
   for(int p=0;p<PAGE_TOTAL;p++){
     curPage=p;
     if(p==PAGE_MAIN)  refresh_main();
-    if(p==PAGE_BOOST){ refresh_boost(); shift_blink_cb(nullptr); }  // Schaltblitz einmal "an"
+    if(p==PAGE_BOOST){ refresh_boost(); gBoostBar=1.20f; refresh_boost(); shift_blink_cb(nullptr); }  // Max-Strich bei 1.85, Schaltblitz einmal "an"
     if(p==PAGE_DTC)   refresh_dtc_ui();
     if(p==PAGE_ACCEL) refresh_accel();
     if(p==PAGE_OILSCAN) refresh_oilscan();
