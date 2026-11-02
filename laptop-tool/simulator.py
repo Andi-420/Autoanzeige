@@ -37,6 +37,8 @@ class SimulatedELM:
         self.stored = ["P0299", "P0420", "P0016"]
         self.pending = ["P0301"]
         self.permanent = ["P0420"]
+        # Fehlerspeicher des Motorsteuergeräts (UDS): Code, Fehlerart, Status
+        self.uds_dtcs = [("P0299", 0x00, 0x08), ("P0301", 0x00, 0x2F), ("P1297", 0x11, 0x08)]
         self._reset()
 
     def _reset(self):
@@ -170,6 +172,21 @@ class SimulatedELM:
             "batt": 14.2 + random.uniform(-0.05, 0.05),
         }
 
+    def _did(self, did, s):
+        """Simulierte Kennnummern des Motorsteuergeräts (Mode 22)."""
+        text = {0xF187: "DEMO906000", 0xF189: "0001", 0xF191: "DEMO907000",
+                0xF197: "DEMO ECU", 0xF18C: "SN0000000001", 0xF190: VIN}
+        if did in text:
+            return [ord(ch) for ch in text[did]]
+        k10 = lambda t: list(int((t + 273.1) * 10).to_bytes(2, "big"))
+        return {
+            0x11BD: lambda: k10(s["oil"]),                    # Öltemperatur
+            0x1040: lambda: k10(s["coolant"]),                # Kühlwasser, Kelvin/10
+            0x10A0: lambda: [int(s["iat"] + 40)],             # Ansaugluft, A-40
+            0x1158: lambda: list(int(s["rpm"]).to_bytes(2, "big")),
+            0x2004: lambda: [0x12, 0x34, 0x56, 0x78],         # fester Wert
+        }.get(did, lambda: None)()
+
     def _obd(self, c):
         mode, rest = c[:2], c[2:]
         s = self._state()
@@ -211,6 +228,7 @@ class SimulatedELM:
 
         if mode == "04" and not rest:
             self.stored, self.pending = [], []      # permanente Codes bleiben stehen
+            self.uds_dtcs = []
             return "44" + ("\r44" if self.header == "7DF" else "")
 
         if c == "0902":
@@ -219,9 +237,18 @@ class SimulatedELM:
         if mode == "22" and len(rest) == 4:
             if self.header != "7E0":
                 return "NO DATA"
-            if rest == "11BD":
-                k10 = int((s["oil"] + 273.1) * 10)
-                return self._fmt([0x62, 0x11, 0xBD] + list(k10.to_bytes(2, "big")))
-            return self._fmt([0x7F, 0x22, 0x31])
+            did = int(rest, 16)
+            data = self._did(did, s)
+            if data is None:
+                return self._fmt([0x7F, 0x22, 0x31])
+            return self._frames([0x62, did >> 8, did & 0xFF] + data)
+
+        if c == "1902FF":
+            if self.header != "7E0":
+                return "NO DATA"
+            data = [0x59, 0x02, 0xFF]
+            for code, ftb, st in self.uds_dtcs:
+                data += _code_bytes(code) + [ftb, st]
+            return self._frames(data)
 
         return "NO DATA"

@@ -267,3 +267,69 @@ class ELM327:
             if (base + 0x20) not in pids:
                 break
         return pids
+
+    # ── Direkter Zugriff aufs Motorsteuergerät (UDS, nur lesend) ────
+
+    def need_uds(self):
+        if not self.protocol:
+            raise ElmError("Das Auto antwortet noch nicht. Zündung an und kurz warten.")
+        if not self.is_can:
+            raise ElmError("Direkter Zugriff aufs Steuergerät geht nur bei CAN-Fahrzeugen.")
+
+    def read_did(self, did):
+        """Eine Kennnummer lesen. Liefert (Status, Daten/NRC) wie uds_read."""
+        self.need_uds()
+        return self.uds_read(did, 2.0)
+
+    def read_ecu_info(self):
+        """Teilenummer, Softwareversion usw. des Motorsteuergeräts."""
+        self.need_uds()
+        info = []
+        for did, label in dec.ECU_INFO_DIDS:
+            st, val = self.uds_read(did, 2.0)
+            if st == dec.UDS_OK:
+                text = dec.ascii_text(val) or " ".join("%02X" % b for b in val)
+                info.append((label, text))
+        return info
+
+    def read_uds_dtcs(self):
+        """Fehlerspeicher des Motorsteuergeräts (UDS 19 02, alle Statusbits)."""
+        self.need_uds()
+        self.set_header(True)
+        r = self.send("1902FF", 6.0)
+        st, val = dec.parse_uds_dtcs(r)
+        if st == dec.UDS_OK:
+            return val
+        if st == dec.UDS_NEG:
+            raise ElmError("Das Motorsteuergerät liefert seinen Fehlerspeicher nicht "
+                           "(%s)." % dec.nrc_text(val))
+        raise ElmError("Keine Antwort vom Motorsteuergerät. Zündung an?")
+
+    def scan_dids(self, lo, hi):
+        """Kennnummern lo..hi durchprobieren (wie die Öl-Suche am Display).
+
+        Generator: liefert regelmäßig ('progress', did, Anteil) und für jede
+        Kennnummer, die antwortet, ('hit', did, daten). Mode 22 liest nur.
+        """
+        self.need_uds()
+        self.set_header(True)
+        silent = nrc11 = hits = 0
+        total = hi - lo + 1
+        for did in range(lo, hi + 1):
+            st, val = self.uds_read(did, 1.0)
+            if st == dec.UDS_OK:
+                silent = 0
+                hits += 1
+                yield ("hit", did, val)
+            elif st == dec.UDS_NEG:
+                silent = 0
+                if val == 0x11:
+                    nrc11 += 1
+            else:
+                silent += 1
+            if silent >= 20:
+                raise ElmError("Das Motorsteuergerät antwortet nicht mehr. Zündung an?")
+            if nrc11 >= 20 and hits == 0:
+                raise ElmError("Das Motorsteuergerät unterstützt das Lesen von Kennnummern nicht.")
+            if (did - lo) % 16 == 15 or did == hi:
+                yield ("progress", did, (did - lo + 1) / float(total))

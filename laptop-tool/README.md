@@ -7,7 +7,8 @@ Auto (`OBD.ino`), also auch die Öltemperatur des Fabia 3 (`22 11BD` am Motorste
 | Reiter | Inhalt |
 |---|---|
 | **Live-Werte** | Drehzahl, Ladedruck (mit Maximum), Öl, Kühlwasser, Ansaugluft, Katalysator, Zündwinkel, Batterie, Geschwindigkeit, Motorlast, Drosselklappe, Saugrohrdruck. Auf Wunsch als CSV-Datei mitschreiben |
-| **Fehlercodes** | gespeicherte (Mode 03), anstehende (Mode 07) und permanente (Mode 0A) Codes aller abgasrelevanten Steuergeräte, Zustand der Motorkontrollleuchte. Löschen (Mode 04) mit Sicherheitsabfrage |
+| **Fehlercodes** | gespeicherte (Mode 03), anstehende (Mode 07) und permanente (Mode 0A) Codes aller abgasrelevanten Steuergeräte, Zustand der Motorkontrollleuchte. Dazu der Fehlerspeicher des Motorsteuergeräts direkt (UDS), mit herstellerspezifischen Codes und Fehlerart. Löschen (Mode 04) mit Sicherheitsabfrage |
+| **Steuergerät** | direkter Zugriff aufs Motorsteuergerät (nur lesend): Teilenummer und Softwareversion, beliebige Kennnummern lesen (Mode 22), einen Bereich durchsuchen wie die Öl-Suche am Display, gefundene Werte als eigene Live-Kacheln speichern |
 | **Fahrzeug** | Fahrgestellnummer, Adapter, Protokoll, Spannung und die Liste der Werte, die das Auto über OBD liefert |
 | **Terminal** | eigene Befehle an den ELM327 schicken (z. B. `ATRV`, `010C`) und die komplette Kommunikation mitlesen |
 
@@ -46,6 +47,23 @@ wieder durchgelaufen sind, fällt das Auto bei der Abgasuntersuchung durch. Am b
 **Motor aus, Zündung an** löschen. Permanente Codes lassen sich grundsätzlich nicht löschen, sie
 verschwinden erst, wenn das Steuergerät den Fehler bei späteren Fahrten nicht mehr feststellt.
 
+### Steuergerät: Kennnummern suchen und als Live-Wert speichern
+
+Das Motorsteuergerät kennt viel mehr Messwerte als die genormten OBD-Werte, aber nur unter
+herstellerspezifischen Kennnummern (DIDs), die nirgends öffentlich aufgelistet sind. So findet man sie:
+
+1. Motor **kalt**, Zündung an. Im Reiter **Steuergerät** einen Bereich eintragen (Vorschlag `1000`–`2FFF`,
+   dauert etwa 5–10 Minuten) und **Suche starten**. Die Live-Werte sind währenddessen pausiert.
+   Alle Kennnummern, die antworten, landen in der Liste, mit den gängigen Umrechnungen
+   (A−40, A·0,75−48, Kelvin/10, °C/10).
+2. Nach einer Fahrt **Treffer neu lesen**. In der Spalte „vorher“ steht dann der alte Wert, so sieht man,
+   was sich wie eine Temperatur verändert hat.
+3. Zeile auswählen (oder doppelklicken) → **Als Live-Wert hinzufügen …**: Name, Formel und Einheit
+   wählen. Der Wert erscheint dann als eigene Kachel bei den Live-Werten und in der CSV-Aufzeichnung.
+   Die Liste bleibt gespeichert; unter „Eigene Live-Werte“ lässt sich ein Wert wieder entfernen.
+
+Es wird nur gelesen (UDS-Dienste 22 und 19), am Steuergerät wird nichts verändert oder codiert.
+
 ### CSV-Aufzeichnung
 
 **● CSV-Aufzeichnung** fragt nach einem Dateinamen und startet die Live-Werte. Die Datei nutzt
@@ -68,7 +86,7 @@ lässt sie sich als Textdatei ablegen, z. B. um sie hier ins Projekt zu stellen.
 
 ## Grenzen
 
-- Gelesen wird nur, was über **OBD-II** geht: Motor und die anderen abgasrelevanten Steuergeräte.
+- Gelesen wird nur, was über **OBD-II** geht, plus Fehlerspeicher und Kennnummern des **Motorsteuergeräts** (UDS).
   Fehlerspeicher von Airbag, ABS, Komfortelektronik usw. und Codierungen/Anpassungen brauchen
   herstellerspezifische Diagnose (bei VW/Skoda z. B. VCDS oder OBDeleven).
 - Die Beschreibungen der Fehlercodes gibt es nur für häufige genormte Codes und ohne Gewähr.
