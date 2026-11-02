@@ -99,6 +99,44 @@ class DecodeTest(unittest.TestCase):
         self.assertIn("Netzwerk", dec.dtc_description("U0400"))
 
 
+class UdsDecodeTest(unittest.TestCase):
+    def test_uds_dtcs(self):
+        st, codes = dec.parse_uds_dtcs("59 02 FF 02 99 00 08 03 01 00 2F")
+        self.assertEqual(st, dec.UDS_OK)
+        self.assertEqual(codes, [("P0299", 0x00, 0x08), ("P0301", 0x00, 0x2F)])
+        self.assertEqual(dec.parse_uds_dtcs("59 02 FF"), (dec.UDS_OK, []))
+
+    def test_uds_dtcs_response_pending_then_answer(self):
+        # Steuergerät meldet erst "Antwort folgt" (NRC 78), dann die Daten über mehrere Frames
+        r = "7F 19 78\n00B\n0: 59 02 FF 02 99 00\n1: 08 12 97 11 08 00 00"
+        st, codes = dec.parse_uds_dtcs(r)
+        self.assertEqual(st, dec.UDS_OK)
+        self.assertEqual(codes, [("P0299", 0, 8), ("P1297", 0x11, 8)])
+
+    def test_uds_dtcs_negative(self):
+        self.assertEqual(dec.parse_uds_dtcs("7F 19 11"), (dec.UDS_NEG, 0x11))
+        self.assertEqual(dec.parse_uds_dtcs("7F 19 78"), (dec.UDS_NONE, None))
+        self.assertEqual(dec.parse_uds_dtcs("NO DATA"), (dec.UDS_NONE, None))
+
+    def test_status_text(self):
+        self.assertIn("aktuell", dec.uds_status_text(0x2F))
+        self.assertIn("gespeichert", dec.uds_status_text(0x08))
+        self.assertIn("anstehend", dec.uds_status_text(0x04))
+        self.assertIn("Warnleuchte", dec.uds_status_text(0x89))
+
+    def test_formulas(self):
+        self.assertAlmostEqual(dec.apply_formula("K/10", [0x0C, 0x6F]), 45.2, places=1)
+        self.assertEqual(dec.apply_formula("A-40", [0x80]), 88)
+        self.assertEqual(dec.apply_formula("C/10", [0xFF, 0x9C]), -10.0)
+        self.assertEqual(dec.apply_formula("A*0.75-48", [100]), 27.0)
+        self.assertIsNone(dec.apply_formula("K/10", [0x10]))
+        self.assertIsNone(dec.apply_formula("gibt es nicht", [1]))
+
+    def test_ascii(self):
+        self.assertEqual(dec.ascii_text([0x44, 0x45, 0x4D, 0x4F, 0x20]), "DEMO")
+        self.assertEqual(dec.ascii_text([0x0C, 0x6F]), "")
+
+
 class SimulatorTest(unittest.TestCase):
     def setUp(self):
         self.elm = ELM327(SimulatedELM(speed=20))
@@ -145,6 +183,40 @@ class SimulatorTest(unittest.TestCase):
         self.assertTrue(self.elm.header_phys)
         self.elm.read_dtcs()
         self.assertTrue(self.elm.header_phys)
+
+    def test_ecu_info_and_uds_dtcs(self):
+        info = dict(self.elm.read_ecu_info())
+        self.assertEqual(info["Teilenummer"], "DEMO906000")
+        self.assertEqual(info["Fahrgestellnummer"], VIN)
+        codes = self.elm.read_uds_dtcs()
+        self.assertEqual([c[0] for c in codes], ["P0299", "P0301", "P1297"])
+        self.assertFalse(self.elm.header_phys is False)     # bleibt auf 7E0
+        self.elm.clear_dtcs()
+        self.assertEqual(self.elm.read_uds_dtcs(), [])
+
+    def test_read_did_and_scan(self):
+        st, val = self.elm.read_did(0x11BD)
+        self.assertEqual(st, dec.UDS_OK)
+        self.assertEqual(len(val), 2)
+        self.assertEqual(self.elm.read_did(0x1234), (dec.UDS_NEG, 0x31))
+        events = list(self.elm.scan_dids(0x1030, 0x10AF))
+        hits = [e[1] for e in events if e[0] == "hit"]
+        self.assertEqual(hits, [0x1040, 0x10A0])
+        progress = [e for e in events if e[0] == "progress"]
+        self.assertEqual(progress[-1][1:], (0x10AF, 1.0))
+
+    def test_live_custom_did(self):
+        custom = [{"did": 0x1040, "name": "KW (UDS)", "fml": "K/10", "unit": "°C", "nd": 1}]
+        lr = LiveReader(self.elm, custom)
+        v = lr.cycle()
+        self.assertAlmostEqual(v["did_1040"], v["coolant"], delta=1.0)
+        lr.set_custom([])
+        self.assertNotIn("did_1040", lr.cycle())
+
+    def test_uds_needs_can(self):
+        self.elm.is_can = False
+        with self.assertRaises(ElmError):
+            self.elm.read_uds_dtcs()
 
     def test_ignition_off_then_on(self):
         elm = ELM327(SimulatedELM(ignition=False))

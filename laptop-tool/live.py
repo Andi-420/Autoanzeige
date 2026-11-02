@@ -40,10 +40,20 @@ class _Item:
         self.fail = 0
 
 
+def custom_key(c):
+    return "did_%04X" % c["did"]
+
+
+def custom_fields(custom):
+    """Eigene Werte (Kennnummern vom Motorsteuergerät) im Format von FIELDS."""
+    return [(custom_key(c), c["name"], c.get("unit", ""), int(c.get("nd", 1))) for c in custom or []]
+
+
 class LiveReader:
-    def __init__(self, elm):
+    def __init__(self, elm, custom=None):
         self.elm = elm
         self.values = {k: None for k, *_ in FIELDS}
+        self._custom = []
         self.boost_max = None
         self.oil_source = "22 11BD" if elm.is_can else "015C"
         self._map87 = None      # None = noch nicht geprüft
@@ -61,6 +71,24 @@ class LiveReader:
             _Item("batt", 1, self.elm.voltage),
             _Item("baro", 10, self._baro),
         ]
+        self.set_custom(custom)
+
+    def set_custom(self, custom):
+        """Eigene Kennnummern (aus dem Reiter Steuergerät), je 1x pro Sekunde."""
+        self._items = [it for it in self._items if not it.key.startswith("did_")]
+        for k in [k for k in self.values if k.startswith("did_")]:
+            del self.values[k]
+        self._custom = list(custom or [])
+        if not self.elm.is_can:
+            return
+        for c in self._custom:
+            key = custom_key(c)
+            self.values[key] = None
+            self._items.append(_Item(key, 1, lambda c=c: self._did(c)))
+
+    def _did(self, c):
+        st, val = self.elm.uds_read(c["did"])
+        return dec.apply_formula(c["fml"], val) if st == dec.UDS_OK else None
 
     # ── einzelne Werte ───────────────────────────────────────────────
 

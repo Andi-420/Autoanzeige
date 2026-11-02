@@ -389,3 +389,110 @@ def dtc_description(code):
     if code[0] == "P" and code[1] in "02":
         return "Antrieb: %s" % _P_AREA.get(code[2], "genormt")
     return "%s, genormt" % system
+
+
+# ── Direkter Zugriff aufs Motorsteuergerät (UDS) ─────────────────────
+
+# Gängige Kodierungen von Messwerten (wie bei der Öl-Suche in OilScan.h)
+FORMULAS = [
+    ("A", "A (Rohwert)", lambda d: float(d[0]) if len(d) >= 1 else None),
+    ("A-40", "A − 40", lambda d: d[0] - 40.0 if len(d) >= 1 else None),
+    ("A*0.75-48", "A · 0,75 − 48", lambda d: d[0] * 0.75 - 48 if len(d) >= 1 else None),
+    ("AB", "A·256 + B (Rohwert)", lambda d: float((d[0] << 8) | d[1]) if len(d) >= 2 else None),
+    ("K/10", "(A·256+B)/10 − 273,1 (Kelvin/10)",
+     lambda d: ((d[0] << 8) | d[1]) / 10.0 - 273.1 if len(d) >= 2 else None),
+    ("C/10", "(A·256+B)/10 mit Vorzeichen",
+     lambda d: _s16(d) / 10.0 if len(d) >= 2 else None),
+]
+FORMULA_BY_KEY = {k: (label, fn) for k, label, fn in FORMULAS}
+
+
+def _s16(d):
+    v = (d[0] << 8) | d[1]
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def apply_formula(key, data):
+    """Rohbytes mit einer Formel umrechnen, None wenn nicht passend."""
+    f = FORMULA_BY_KEY.get(key)
+    if not f or not data:
+        return None
+    try:
+        return f[1](data)
+    except (IndexError, TypeError):
+        return None
+
+
+def ascii_text(data):
+    """Bytes als Text, wenn sie überwiegend druckbar sind (Teilenummern usw.)."""
+    if not data:
+        return ""
+    s = "".join(chr(b) for b in data if 0x20 <= b < 0x7F)
+    return s.strip() if len(s) >= max(2, len(data) * 0.8) else ""
+
+
+NRC_TEXT = {
+    0x10: "abgelehnt",
+    0x11: "Dienst nicht unterstützt",
+    0x12: "Unterfunktion nicht unterstützt",
+    0x13: "falsche Länge",
+    0x14: "Antwort zu lang",
+    0x22: "Bedingungen nicht erfüllt",
+    0x31: "Kennnummer unbekannt",
+    0x33: "gesperrt (Sicherheitszugang nötig)",
+    0x78: "Antwort folgt",
+    0x7E: "in dieser Sitzung nicht möglich",
+    0x7F: "in dieser Sitzung nicht möglich",
+}
+
+
+def nrc_text(nrc):
+    return NRC_TEXT.get(nrc, "Fehler 0x%02X" % nrc)
+
+
+# Genormte UDS-Kennnummern mit Infos über das Steuergerät (ISO 14229)
+ECU_INFO_DIDS = [
+    (0xF187, "Teilenummer"),
+    (0xF189, "Softwareversion"),
+    (0xF191, "Hardware-Nummer"),
+    (0xF197, "Systemname"),
+    (0xF18C, "Seriennummer"),
+    (0xF190, "Fahrgestellnummer"),
+]
+
+
+def parse_uds_dtcs(resp):
+    """Antwort auf 19 02 FF (Fehlerspeicher lesen, UDS).
+
+    Positiv: 59 02 <Maske> und dann je Fehler 4 Bytes: DTC (3 Bytes) + Status.
+    Liefert ('ok', [(code, fehlerart, status), ...]), ('neg', NRC) oder ('none', None).
+    """
+    for m in messages(resp):
+        if m.startswith("5902"):
+            data = hex_bytes(m[6:])
+            out = []
+            for i in range(0, len(data) - 3, 4):
+                b1, b2, ftb, st = data[i:i + 4]
+                if b1 == 0 and b2 == 0 and ftb == 0:
+                    continue
+                out.append((dtc_format(b1, b2), ftb, st))
+            return UDS_OK, out
+    for m in messages(resp):
+        i = m.find("7F19")
+        if i >= 0 and i % 2 == 0 and len(m) >= i + 6 and m[i + 4:i + 6] != "78":
+            return UDS_NEG, int(m[i + 4:i + 6], 16)
+    return UDS_NONE, None
+
+
+def uds_status_text(st):
+    """Statusbyte eines UDS-Fehlers in Worte fassen."""
+    parts = []
+    if st & 0x01:
+        parts.append("aktuell vorhanden")
+    elif st & 0x08:
+        parts.append("gespeichert, derzeit nicht vorhanden")
+    if st & 0x04 and not st & 0x08:
+        parts.append("anstehend")
+    if st & 0x80:
+        parts.append("Warnleuchte an")
+    return ", ".join(parts) or "Status 0x%02X" % st
