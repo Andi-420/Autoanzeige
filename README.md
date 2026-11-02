@@ -128,6 +128,14 @@ Technisch: Für Mode 22 wird das Motorsteuergerät direkt adressiert (`ATSH7E0`)
 | `font_boost_*.c` | Fette Schrift (Montserrat ExtraBold, OFL-Lizenz) für die Ladedruckseite, nur die benötigten Zeichen; erzeugt mit `lv_font_conv`. Müssen als C (nicht C++) übersetzt werden |
 | `tools/sim/` | UI-Simulator für den PC (siehe unten) |
 | `tools/tests/` | PC-Test der Öl-Such-Logik (Befehl steht oben in der Datei) |
+| `laptop-tool/` | Eigenständiges OBD-Programm für den Laptop (Python, Windows), siehe unten. Gehört nicht in den Sketch-Ordner |
+
+## OBD-Tool für den Laptop
+
+Unter `laptop-tool/` liegt ein kleines Windows-Programm (Python mit Fensteroberfläche), das über einen
+ELM327 am Seriell-USB-Wandler Fehlercodes liest und löscht, Live-Werte anzeigt und als CSV mitschreibt.
+Es nutzt dieselben Abfragen wie die Anzeige, also auch die Öltemperatur über `22 11BD`.
+Start mit `start.bat`, Details siehe [laptop-tool/README.md](laptop-tool/README.md).
 
 ## UI-Simulator (am PC testen)
 
