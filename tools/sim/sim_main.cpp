@@ -40,7 +40,7 @@ int main(){
   lv_display_set_flush_cb(display,lvgl_flush_cb);
   lv_display_set_buffers(display,buf,NULL,sizeof(buf),LV_DISPLAY_RENDER_MODE_FULL);
   gMpuOK=true;
-  build_page_dtc(); build_page_main(); build_page_brightness(); build_page_boost(); build_page_accel(); build_page_oilscan();
+  build_page_dtc(); build_page_main(); build_page_brightness(); build_page_boost(); build_page_accel(); build_page_oilscan(); build_page_trip();
   // Beispieldaten (Worst Case fuer Textbreiten)
   gBatt=14.4f; gOilTemp=105; gCatTemp=742; gCatOK=true; gTiming=-3.5f; gTimingOK=true; gIntakeTemp=54; gIntakeOK=true; gOilOK=true; gCoolant=90; gRPM=6500; gBoostBar=1.85f; gElmOK=gEcuOK=true;
   gAz=-0.45f; gAy=0.62f; gAxMax=-0.9f; gAyMax=0.8f;
@@ -50,12 +50,17 @@ int main(){
   snprintf(gScan.msg,sizeof(gScan.msg),"3 Kandidat(en), KW kalt 14 / warm 91 C.\nOel ist warm meist etwas ueber KW.\nKandidat LANG druecken = speichern.");
   gScan.cand[0]={0x1002,0,16,104,false}; gScan.cand[1]={0x2A1F,2,15.3f,107.9f,false}; gScan.cand[2]={0x1001,0,14,91,true};
   for(int i=0;i<3;i++){gScan.candNow[i]=-12.5f+i;gScan.candNowOk[i]=true;}
-  const char* names[]={"dtc","main","bright","boost","accel","oilscan"};
+  // Fahrt-Statistik (Worst Case fuer Textbreiten)
+  trip={83u*60000u,112.4f,187,6350,1.85f,124,108,0.95f,0.48f,1.12f};
+  // Spitzenwert-Striche: Spitze 1.55 bar, aktuell 1.20 bar
+  boost_peak_sample(1.55f); boostNowCb=120;
+  const char* names[]={"dtc","main","bright","boost","accel","oilscan","trip"};
   int total=0;
   for(int p=0;p<PAGE_TOTAL;p++){
     curPage=p;
     if(p==PAGE_MAIN)  refresh_main();
-    if(p==PAGE_BOOST){ refresh_boost(); gBoostBar=1.20f; refresh_boost(); shift_blink_cb(nullptr); }  // Max-Strich bei 1.85, Schaltblitz einmal "an"
+    if(p==PAGE_BOOST){ refresh_boost(); gBoostBar=1.20f; refresh_boost(); shift_blink_cb(nullptr); boostPeakMs=fakeMs; boost_peak_cb(nullptr); }
+    if(p==PAGE_TRIP)  refresh_trip();  // Max-Strich bei 1.85, Schaltblitz einmal "an"
     if(p==PAGE_DTC)   refresh_dtc_ui();
     if(p==PAGE_ACCEL) refresh_accel();
     if(p==PAGE_OILSCAN) refresh_oilscan();

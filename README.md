@@ -31,7 +31,7 @@ Architektur: Der OBD-Task läuft auf Core 0 (blockierende UART-Kommunikation), L
                 [Fehlercodes]
                       ↑
 [Ladedruck/Öl]  ←  [HAUPTSEITE]  →  [G-Meter]
-                      ↓
+                      ↓       ⤷ Mitte antippen: [Fahrt-Statistik]
                  [Helligkeit]
 ```
 
@@ -39,10 +39,11 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 
 | Seite | Inhalt |
 |---|---|
-| **Hauptseite** | Batteriespannung, Öltemperatur, Katalysatortemperatur (cyan < 300 °C, grün, orange > 850 °C, rot > 950 °C), Zündwinkel (° vor OT; orange wenn negativ = nach OT). Drehzahl und Kühlwasser zeigt schon das Kombiinstrument; sie werden intern weiter gelesen (Schaltblitz, Öl-Suche). In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht) |
-| **Ladedruck / Öl** | Großer Ladedruck-Ring außen, Öl-Ring innen, in der Mitte **BOOST** mit Wert in fetter Schrift. Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Ein **roter Strich** auf dem Ladedruck-Ring markiert das bisher erreichte Maximum dieser Fahrt (erscheint ab dem ersten Überdruck, wird beim Einschlafen/Aufwachen zurückgesetzt). Innerer Bogen: Öltemperatur (cyan bis 60 °C, türkisgrün bis 80 °C, grün bis 105 °C, darüber rot). Unter dem Ladedruck klein nebeneinander: **Öl** (links) und **Ansaugluft** (rechts; cyan, gelb ab 50 °C, rot ab 65 °C). **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
+| **Hauptseite** | Batteriespannung, Öltemperatur, Katalysatortemperatur (cyan < 300 °C, grün, orange > 850 °C, rot > 950 °C), Zündwinkel (° vor OT; orange wenn negativ = nach OT). Drehzahl und Kühlwasser zeigt schon das Kombiinstrument; sie werden intern weiter gelesen (Schaltblitz, Öl-Suche). In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht). **Mitte antippen** öffnet die Fahrt-Statistik |
+| **Ladedruck / Öl** | Großer Ladedruck-Ring außen, Öl-Ring innen, in der Mitte **BOOST** mit Wert in fetter Schrift. Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Ein **roter Strich** quer über den Ladedruck-Ring markiert das bisher erreichte Maximum dieser Fahrt (erscheint ab dem ersten Überdruck, wird auch erfasst, während eine andere Seite angezeigt wird, und beim Einschlafen/Aufwachen zurückgesetzt). **Spitzenwert-Anzeige wie beim Verstärker:** zwei kleine rote Striche außen und innen am Ring bleiben 2 s beim höchsten Ladedruck stehen und sinken dann mit 0,6 bar/s auf den aktuellen Wert zurück (nur im Überdruck; `PEAK_HOLD_MS`, `PEAK_FALL_CB_S`). Innerer Bogen: Öltemperatur (cyan bis 60 °C, türkisgrün bis 80 °C, grün bis 105 °C, darüber rot). Unter dem Ladedruck klein nebeneinander: **Öl** (links) und **Ansaugluft** (rechts; cyan, gelb ab 50 °C, rot ab 65 °C). **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
 | **Fehlercodes** | „AUSLESEN“ tippen, dann werden die gespeicherten Fehlercodes (Mode 03) angezeigt, z. B. `P0123` |
 | **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten. Knopf **WARNTEST** löst einen Probealarm aus (Hinweisfeld + Summer), Antippen des Hinweisfelds beendet ihn |
+| **Fahrt-Statistik** | Fahrzeit (Zündung an), Strecke, Tempo mittel und max, Ladedruck max, Drehzahl max, Öl/Wasser max, G-Werte (Bremsen/Gas, Kurve; nur ab 10 km/h, damit Türzuschlagen nicht zählt). Erreichbar über die Mitte der Hauptseite; nach einer Fahrt (mind. 1 min) erscheint sie **automatisch bei Zündung aus**, darunter der Schlaf-Countdown. Springt der Motor wieder an, geht es zurück zur vorherigen Seite. Eine „Fahrt“ läuft vom Aufwachen bis zum Einschlafen, kurzes Abstellen gehört also dazu. Beim Einschlafen wird sie gespeichert; bis die neue Fahrt 1 min alt ist, zeigt die Seite die **letzte Fahrt**. Wischen = zurück zur Hauptseite |
 | **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** (Auto steht still, möglichst eben) übernimmt die momentane Lage des Geräts als neue Nullausrichtung und löscht die Max-Werte. Dabei wird die Schwerkraftrichtung gemessen und die Anzeige auf die waagerechte Längs- und Querachse umgerechnet, so dass auch ein stark schräger Einbau sauber ausgeglichen wird. Die Ausrichtung wird gespeichert und bleibt nach Neustart und Schlafmodus erhalten |
 
 ## Abgefragte Werte
@@ -55,12 +56,13 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | Kühlwasser | 0105 (für die Öl-Suche) | 1 s |
 | Zündwinkel | 010E: A/2 − 64 ° vor OT | 250 ms |
 | Ansauglufttemperatur | 010F: A − 40 °C | 1 s |
+| Geschwindigkeit | 010D: A km/h (Fahrt-Statistik) | 1 s |
 | Katalysatortemperatur | 013C (Bank 1, Sensor 1): (A·256+B)/10 − 40 °C | 1 s |
 | Öltemperatur | `2211BD` an das Motorsteuergerät (7E0), Formel (A·256+B)/10 − 273,1 (Kelvin/10). Fest eingebaut; eine per Öl-Suche gespeicherte andere DID hat Vorrang | 1 s |
 | Umgebungsdruck | 0133 | 10 s (Startwert 101,3 kPa, bis der erste Messwert da ist) |
 | Fehlerspeicher | 03 (Rundruf an alle Steuergeräte) | 60 s im Hintergrund, erste Prüfung ca. 15 s nach dem Start (siehe Warnungen) |
 
-Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; Kat-Temperatur, Zündwinkel und Ansaugluft werden dann nach 5 Fehlversuchen nur noch alle 30 s erneut versucht.
+Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; Kat-Temperatur, Zündwinkel, Ansaugluft und Geschwindigkeit werden dann nach 5 Fehlversuchen nur noch alle 30 s erneut versucht.
 
 ### Hinweise zum Fabia 3 / 1.0 TSI
 

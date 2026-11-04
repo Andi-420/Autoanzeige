@@ -17,6 +17,9 @@
  * Warnungen: Summer + Hinweisfeld bei Oel > 120 C, Kuehlwasser > 105 C und
  *          neuem Fehlercode (Fehlerspeicher wird jede Minute geprueft)
  *
+ * Fahrt-Statistik: Mitte der Hauptseite antippen; erscheint auch automatisch
+ *          bei Zuendung aus. Wird beim Einschlafen als "letzte Fahrt" gespeichert.
+ *
  * ELM327: UART1, GPIO43(TX)/GPIO44(RX) + MAX232A
  * IMU:    I2C (GPIO7=SCL, GPIO15=SDA)
  *
@@ -60,7 +63,8 @@
 #define PAGE_ACCEL  4
 #define PAGE_COUNT  5   // Seiten mit Wisch-Navigation (Punkte unten)
 #define PAGE_OILSCAN 5  // Oel-Suche: nur ueber Knopf auf der Ladedruckseite erreichbar
-#define PAGE_TOTAL  6
+#define PAGE_TRIP    6  // Fahrt-Statistik: Mitte der Hauptseite antippen, nach Zuendung aus automatisch
+#define PAGE_TOTAL  7
 
 #define C_BG      0x0A0A12
 #define C_SURFACE 0x12121E
@@ -103,6 +107,8 @@ static float gTiming = 0.0f;      // PID 0x0E, Zuendwinkel (Grad vor OT, negativ
 static bool  gTimingOK = false;
 static int   gIntakeTemp = 0;     // PID 0x0F, Ansauglufttemperatur (Grad C)
 static bool  gIntakeOK = false;
+static int   gSpeed = 0;          // PID 0x0D, Geschwindigkeit (km/h)
+static bool  gSpeedOK = false;
 
 // Ladedruck-Berechnung: MAP (Drosselklappen-/Saugrohrdruck) - Umgebungsdruck
 static float gMapKPa = 0.0f;      // PID 0x0B, absoluter Druck nach Drosselklappe (kPa)
@@ -166,6 +172,8 @@ static volatile int gScanCmd = SCMD_NONE;
 #define LCD_BL_GPIO       GPIO_NUM_6 // Hintergrundlicht (LCD_BL_PIN), im Schlaf fest auf LOW
 #define TOUCH_INT_GPIO    GPIO_NUM_16// CST820_INT_PIN, Weckquelle
 
+#define SHIFT_RPM         3500       // Schaltblitz auf der Ladedruckseite ab dieser Drehzahl
+
 // ── Warnungen: Summer + Hinweisfeld ueber jeder Seite ─────────────
 #define WARN_OIL_C        120        // Oeltemperatur ueber ... Grad C
 #define WARN_COOL_C       105        // Kuehlwasser ueber ... Grad C
@@ -199,6 +207,26 @@ struct Warn {                       // nur im LVGL-Task benutzt
   uint32_t lastBeep;                // 0 = noch nicht gepiept
 };
 static Warn warns[WARN_COUNT] = {};
+
+// Fahrt-Statistik: eine "Fahrt" laeuft vom Aufwachen bis zum Einschlafen (kurzes
+// Abstellen unter SLEEP_AFTER_MS gehoert also noch dazu). Beim Einschlafen wird sie
+// als "letzte Fahrt" im NVS gespeichert. Nur im LVGL-Task benutzt.
+struct TripStats {
+  uint32_t ms;          // Zeit mit Zuendung an (Steuergeraet antwortet)
+  float    km;          // Strecke aus der Geschwindigkeit
+  uint16_t vMax;        // km/h
+  uint16_t rpmMax;
+  float    boostMax;    // bar
+  int16_t  oilMax;      // Grad C, -100 = kein Wert
+  int16_t  coolMax;
+  float    gBrake, gGas, gLat;   // hoechste Verzoegerung / Beschleunigung / Querbeschleunigung (G)
+};
+#define TRIP_MIN_MS   60000UL   // kuerzere "Fahrten" (nur Zuendung an) zaehlen nicht
+#define TRIP_NO_TEMP  (-100)
+static TripStats trip = {0, 0, 0, 0, -1.0f, TRIP_NO_TEMP, TRIP_NO_TEMP, 0, 0, 0};
+static TripStats tripLast = {};
+static bool tripLastOk = false;
+static int  tripAutoPrev = -1;    // Seite vor dem automatischen Umschalten (Zuendung aus), -1 = keine
 
 struct ScanStatus {                 // unter Mutex
   int     phase;
@@ -269,6 +297,14 @@ static bool gmeter_set_orientation(float gx, float gy, float gz) {
   return true;
 }
 
+// Aktuelle Laengs- und Querbeschleunigung in G (geglaettet, auf die kalibrierten Achsen
+// projiziert). lon > 0 = Bremsen, lon < 0 = Gas, lat > 0 = rechts (wie die G-Meter-Seite).
+static void gm_axes(float &lon, float &lat) {
+  const float a[3] = {gAx, gAy, gAz};
+  lon = -(vdot(a, gFwd) - gOffLong);
+  lat = -(vdot(a, gLat) - gOffLat);
+}
+
 // DTC
 #define DTC_MAX 10
 static String dtcList[DTC_MAX];
@@ -306,11 +342,14 @@ static void refresh_dtc_ui(void);
 static void refresh_boost(void);
 static void refresh_accel(void);
 static void refresh_oilscan(void);
+static void refresh_trip(void);
+static void boost_peak_sample(float bar);
 
 // Zuletzt angezeigte Seite merken (NVS), damit das Geraet beim naechsten Start
 // dort weitermacht. Die Oel-Suche zaehlt als Ladedruckseite (von dort erreichbar).
 // Nur bei Aenderung schreiben (Flash-Verschleiss).
 static void save_page(int idx) {
+  if (idx == PAGE_TRIP) return;   // Statistik ist nur ein Abstecher
   uint8_t p = (idx == PAGE_OILSCAN) ? PAGE_BOOST : (uint8_t)idx;
   if (prefs.getUChar("page", PAGE_MAIN) != p) prefs.putUChar("page", p);
 }
@@ -329,6 +368,7 @@ static void show_page(int idx, bool anim) {
     case PAGE_DTC:   refresh_dtc_ui(); warns[WARN_DTC].active = false; break;
     case PAGE_ACCEL: refresh_accel();  break;
     case PAGE_OILSCAN: refresh_oilscan(); break;
+    case PAGE_TRIP:  refresh_trip();   break;
     default: break;
   }
   if (anim) lv_screen_load_anim(screens[idx], LV_SCR_LOAD_ANIM_FADE_ON, 200, 0, false);
@@ -337,6 +377,7 @@ static void show_page(int idx, bool anim) {
 
 static void goto_page(int idx) {
   if (idx < 0 || idx >= PAGE_TOTAL) return;
+  tripAutoPrev = -1;              // selbst gewaehlt: nicht automatisch zurueckspringen
   show_page(idx, true);
   save_page(idx);
 }
@@ -621,6 +662,14 @@ static void build_page_main(void) {
   lv_obj_set_style_text_font(lbl_obd_status, &lv_font_montserrat_12, 0);
   lv_obj_set_style_text_color(lbl_obd_status, lv_color_hex(C_MUTED), 0);
   lv_obj_align(lbl_obd_status, LV_ALIGN_CENTER, 0, 0);
+
+  // Mitte antippen = Fahrt-Statistik
+  lv_obj_t *hit = lv_obj_create(scr);
+  lv_obj_remove_style_all(hit);
+  lv_obj_set_size(hit, 110, 56);
+  lv_obj_align(hit, LV_ALIGN_CENTER, 0, 0);
+  lv_obj_add_flag(hit, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_add_event_cb(hit, [](lv_event_t*e){ goto_page(PAGE_TRIP); }, LV_EVENT_CLICKED, nullptr);
 
   add_nav_dots(scr, PAGE_MAIN);
 }
@@ -977,6 +1026,161 @@ static void warn_update(void) {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// FAHRT-STATISTIK (Seite ohne Wisch-Navigation, Wischen = zurueck)
+// ══════════════════════════════════════════════════════════════════
+#define TRIP_ROWS 9
+static lv_obj_t *trip_sub = nullptr;
+static lv_obj_t *trip_val[TRIP_ROWS];
+
+static void build_page_trip(void) {
+  lv_obj_t *scr = make_screen();
+  screens[PAGE_TRIP] = scr;
+  add_title(scr, LV_SYMBOL_GPS " FAHRT", C_GREEN);
+
+  trip_sub = lv_label_create(scr);
+  lv_label_set_text(trip_sub, "");
+  lv_obj_set_style_text_font(trip_sub, &lv_font_montserrat_12, 0);
+  lv_obj_set_style_text_color(trip_sub, lv_color_hex(C_MUTED), 0);
+  lv_obj_align(trip_sub, LV_ALIGN_TOP_MID, 0, 66);
+
+  static const char *names[TRIP_ROWS] = {
+    "Fahrzeit", "Strecke", "Tempo mittel", "Tempo max", "Ladedruck max",
+    "Drehzahl max", "Oel / Wasser max", "G Bremsen / Gas", "G Kurve max"
+  };
+  for (int i = 0; i < TRIP_ROWS; i++) {
+    int y = 92 + i * 32;
+    lv_obj_t *n = lv_label_create(scr);
+    lv_label_set_text(n, names[i]);
+    lv_obj_set_style_text_font(n, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(n, lv_color_hex(C_MUTED), 0);
+    lv_obj_align(n, LV_ALIGN_TOP_LEFT, 92, y + 3);
+
+    trip_val[i] = lv_label_create(scr);
+    lv_label_set_text(trip_val[i], "--");
+    lv_obj_set_style_text_font(trip_val[i], &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(trip_val[i], lv_color_hex(C_WHITE), 0);
+    lv_obj_align(trip_val[i], LV_ALIGN_TOP_RIGHT, -92, y);
+  }
+}
+
+static void refresh_trip(void) {
+  if (!trip_sub) return;
+  bool cur = trip.ms >= TRIP_MIN_MS || !tripLastOk;
+  const TripStats &t = cur ? trip : tripLast;
+
+  char b[32];
+  int sleepIn = gSleepIn;
+  if (sleepIn >= 0) snprintf(b, sizeof(b), "SCHLAF %ds", sleepIn);
+  else snprintf(b, sizeof(b), "%s", cur ? "AKTUELLE FAHRT" : "LETZTE FAHRT");
+  lv_label_set_text(trip_sub, b);
+
+  uint32_t min = t.ms / 60000UL;
+  if (min >= 60) snprintf(b, sizeof(b), "%lu:%02lu h", (unsigned long)(min / 60), (unsigned long)(min % 60));
+  else           snprintf(b, sizeof(b), "%lu min", (unsigned long)min);
+  lv_label_set_text(trip_val[0], b);
+
+  snprintf(b, sizeof(b), "%.1f km", t.km);
+  lv_label_set_text(trip_val[1], b);
+
+  float h = t.ms / 3600000.0f;
+  if (h > 0.01f && t.km > 0.05f) snprintf(b, sizeof(b), "%d km/h", (int)lroundf(t.km / h));
+  else                           snprintf(b, sizeof(b), "--");
+  lv_label_set_text(trip_val[2], b);
+
+  if (t.vMax) snprintf(b, sizeof(b), "%u km/h", (unsigned)t.vMax);
+  else        snprintf(b, sizeof(b), "--");
+  lv_label_set_text(trip_val[3], b);
+
+  if (t.boostMax > -0.99f) snprintf(b, sizeof(b), "%+.2f bar", t.boostMax);
+  else                     snprintf(b, sizeof(b), "--");
+  lv_label_set_text(trip_val[4], b);
+  lv_obj_set_style_text_color(trip_val[4], lv_color_hex(t.boostMax > 1.0f ? C_RED
+                              : t.boostMax > 0.5f ? C_ORANGE : C_WHITE), 0);
+
+  if (t.rpmMax) snprintf(b, sizeof(b), "%u U/min", (unsigned)t.rpmMax);
+  else          snprintf(b, sizeof(b), "--");
+  lv_label_set_text(trip_val[5], b);
+  lv_obj_set_style_text_color(trip_val[5], lv_color_hex(t.rpmMax >= SHIFT_RPM ? C_ORANGE : C_WHITE), 0);
+
+  char o[8], w[8];
+  if (t.oilMax  > TRIP_NO_TEMP) snprintf(o, sizeof(o), "%d", t.oilMax);  else snprintf(o, sizeof(o), "--");
+  if (t.coolMax > TRIP_NO_TEMP) snprintf(w, sizeof(w), "%d", t.coolMax); else snprintf(w, sizeof(w), "--");
+  snprintf(b, sizeof(b), "%s / %s \xC2\xB0" "C", o, w);
+  lv_label_set_text(trip_val[6], b);
+  bool hot = t.oilMax > WARN_OIL_C || t.coolMax > WARN_COOL_C;
+  lv_obj_set_style_text_color(trip_val[6], lv_color_hex(hot ? C_RED : C_WHITE), 0);
+
+  snprintf(b, sizeof(b), "%.2f / %.2f", t.gBrake, t.gGas);
+  lv_label_set_text(trip_val[7], b);
+  snprintf(b, sizeof(b), "%.2f G", t.gLat);
+  lv_label_set_text(trip_val[8], b);
+}
+
+// Nach jedem neuen OBD-Datensatz (auf jeder Seite): Statistik fortschreiben,
+// Spitzenwert fuer die Ladedruckseite, und nach Zuendung aus die Statistik zeigen
+static void trip_update(void) {
+  static uint32_t last = 0;
+  static bool wasEcu = false;
+  uint32_t now = millis();
+  uint32_t dt = last ? now - last : 0;
+  last = now;
+  if (dt > 5000) dt = 0;          // Luecke (z.B. Oel-Suche): nichts hochrechnen
+
+  bool ecuOk, spdOk, oilOk;
+  int rpm, spd, oil, cool;
+  float boost;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  ecuOk = gEcuOK; rpm = gRPM; spd = gSpeed; spdOk = gSpeedOK;
+  boost = gBoostBar; oil = gOilTemp; oilOk = gOilOK; cool = gCoolant;
+  xSemaphoreGive(dataMutex);
+
+  if (ecuOk) {
+    boost_peak_sample(boost);
+    trip.ms += dt;
+    if (spdOk) {
+      trip.km += spd * (dt / 3600000.0f);
+      if (spd > trip.vMax) trip.vMax = spd;
+    }
+    if (rpm > trip.rpmMax) trip.rpmMax = rpm;
+    if (boost > trip.boostMax) trip.boostMax = boost;
+    if (oilOk && oil > trip.oilMax) trip.oilMax = oil;
+    if (cool > trip.coolMax) trip.coolMax = cool;
+  }
+
+  // Zuendung aus nach einer echten Fahrt: Statistik zeigen; Motor wieder an: zurueck
+  if (wasEcu && !ecuOk && trip.ms >= TRIP_MIN_MS &&
+      curPage != PAGE_TRIP && curPage != PAGE_OILSCAN && curPage != PAGE_DTC) {
+    tripAutoPrev = curPage;
+    show_page(PAGE_TRIP, true);
+  } else if (!wasEcu && ecuOk && curPage == PAGE_TRIP && tripAutoPrev >= 0) {
+    show_page(tripAutoPrev, true);
+    tripAutoPrev = -1;
+  }
+  wasEcu = ecuOk;
+}
+
+// G-Werte der Fahrt (50x pro Sekunde, nur bei Fahrt: Tuerzuschlagen im Stand zaehlt nicht)
+static void trip_g(void) {
+  if (gSpeed < 10 || !gSpeedOK) return;
+  float lon, lat;
+  gm_axes(lon, lat);
+  if (lon > trip.gBrake) trip.gBrake = lon;
+  if (-lon > trip.gGas)  trip.gGas = -lon;
+  if (fabsf(lat) > trip.gLat) trip.gLat = fabsf(lat);
+}
+
+// Beim Einschlafen: Fahrt als "letzte Fahrt" merken (eine NVS-Schreibung pro Fahrt)
+static void trip_save(void) {
+  if (trip.ms < TRIP_MIN_MS) return;
+  prefs.putBytes("trip", &trip, sizeof(trip));
+}
+
+static void trip_load(void) {
+  if (prefs.getBytesLength("trip") != sizeof(TripStats)) return;
+  tripLastOk = prefs.getBytes("trip", &tripLast, sizeof(tripLast)) == sizeof(tripLast);
+}
+
+// ══════════════════════════════════════════════════════════════════
 // SEITE 2: HELLIGKEIT (SLIDER)
 // ══════════════════════════════════════════════════════════════════
 static lv_obj_t *lbl_bright_val = nullptr;
@@ -1084,7 +1288,18 @@ static lv_obj_t *lbl_oil_val = nullptr;
 static lv_obj_t *lbl_iat_val = nullptr;   // Ansauglufttemperatur, rechts neben Oel
 static lv_obj_t *boost_max_line = nullptr; // roter Strich beim bisher hoechsten Ladedruck
 static lv_point_precise_t boostMaxPts[2];
-static int boostMaxVal = 0;               // Maximum in Centibar; gilt pro Fahrt (Deep-Sleep loescht RAM)
+static int boostMaxVal = 0;               // gezeichnetes Maximum in Centibar (Wert kommt aus trip.boostMax)
+// Spitzenwert-Anzeige wie beim Verstaerker (Peak-Hold): zwei kleine rote Striche aussen
+// und innen am Ladedruck-Ring bleiben PEAK_HOLD_MS beim hoechsten Wert stehen und
+// sinken dann langsam auf den aktuellen Wert zurueck.
+#define PEAK_HOLD_MS    2000UL
+#define PEAK_FALL_CB_S  60.0f     // Sinkgeschwindigkeit in Centibar pro Sekunde (0,6 bar/s)
+static lv_obj_t *boost_peak_out = nullptr, *boost_peak_in = nullptr;
+static lv_point_precise_t boostPeakPtsO[2], boostPeakPtsI[2];
+static float boostNowCb = -1000.0f;       // aktueller Ladedruck in Centibar
+static float boostPeakCb = -1000.0f;      // gehaltener Spitzenwert
+static uint32_t boostPeakMs = 0;          // wann der Spitzenwert erreicht wurde
+static int boostPeakDrawn = -1000;
 
 // Fette Schriften nur fuer diese Seite (Montserrat ExtraBold).
 // Sie liegen als .c-Dateien im Sketch-Ordner (C, nicht C++: der Schriftkonverter
@@ -1142,7 +1357,7 @@ static lv_obj_t* make_gauge(lv_obj_t *scr, int d, int w, int vmin, int vmax, uin
 }
 
 // ── Schaltblitz (wie im Rennsport): roter Ring am Displayrand blinkt ab SHIFT_RPM ──
-#define SHIFT_RPM       3500
+// (SHIFT_RPM steht oben bei den Warnungen, die Fahrt-Statistik nutzt ihn auch)
 #define SHIFT_BLINK_MS  100    // Umschaltintervall -> 5x pro Sekunde an/aus
 static lv_obj_t *shift_ring = nullptr;
 static bool shiftActive = false;   // nur im LVGL-Task benutzt
@@ -1162,6 +1377,51 @@ static void shift_blink_cb(lv_timer_t *t) {
 #define BOOST_ARC_MAX  200    // +2.0 bar
 #define OIL_ARC_MIN   (-20)   // Grad C
 #define OIL_ARC_MAX    150    // Grad C
+
+// Strich quer zum Ladedruck-Ring beim Wert v (Centibar), von Radius r1 bis r2 (px)
+static void boost_tick(lv_obj_t *l, lv_point_precise_t *pts, float v, float r1, float r2) {
+  v = constrain(v, (float)BOOST_ARC_MIN, (float)BOOST_ARC_MAX);
+  float ang = (135.0f + 270.0f * (v - BOOST_ARC_MIN) / (float)(BOOST_ARC_MAX - BOOST_ARC_MIN))
+              * (float)M_PI / 180.0f;
+  const float c = LCD_WIDTH / 2.0f;
+  pts[0].x = c + r1 * cosf(ang); pts[0].y = c + r1 * sinf(ang);
+  pts[1].x = c + r2 * cosf(ang); pts[1].y = c + r2 * sinf(ang);
+  lv_line_set_points(l, pts, 2);
+}
+
+// Jeder neue Messwert (auf allen Seiten, damit nach dem Umschalten nichts fehlt)
+static void boost_peak_sample(float bar) {
+  boostNowCb = constrain(bar * 100.0f, (float)BOOST_ARC_MIN, (float)BOOST_ARC_MAX);
+  if (boostNowCb >= boostPeakCb) { boostPeakCb = boostNowCb; boostPeakMs = millis(); }
+}
+
+// Alle 40 ms: Spitzenwert nach der Haltezeit sinken lassen und Striche zeichnen
+static void boost_peak_cb(lv_timer_t *t) {
+  static uint32_t last = 0;
+  uint32_t now = millis();
+  float dt = (now - last) / 1000.0f;
+  last = now;
+  if (now - boostPeakMs > PEAK_HOLD_MS && boostPeakCb > boostNowCb) {
+    boostPeakCb -= PEAK_FALL_CB_S * dt;
+    if (boostPeakCb < boostNowCb) boostPeakCb = boostNowCb;
+  }
+  if (curPage != PAGE_BOOST || !boost_peak_out) return;
+  // Nur im Ueberdruck und nur, wenn der Spitzenwert ueber dem aktuellen Wert liegt
+  bool show = boostPeakCb > 0.0f && boostPeakCb > boostNowCb + 2.0f;
+  int v = show ? (int)lroundf(boostPeakCb) : -1000;
+  if (v == boostPeakDrawn) return;
+  boostPeakDrawn = v;
+  if (!show) {
+    lv_obj_add_flag(boost_peak_out, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(boost_peak_in, LV_OBJ_FLAG_HIDDEN);
+    return;
+  }
+  const float rRing = BOOST_RING_D / 2.0f;
+  boost_tick(boost_peak_out, boostPeakPtsO, v, rRing + 3.0f, rRing + 11.0f);
+  boost_tick(boost_peak_in,  boostPeakPtsI, v, rRing - BOOST_RING_W - 11.0f, rRing - BOOST_RING_W - 3.0f);
+  lv_obj_remove_flag(boost_peak_out, LV_OBJ_FLAG_HIDDEN);
+  lv_obj_remove_flag(boost_peak_in, LV_OBJ_FLAG_HIDDEN);
+}
 
 static void build_page_boost(void) {
   lv_obj_t *scr = make_screen();
@@ -1241,6 +1501,20 @@ static void build_page_boost(void) {
   lv_obj_clear_flag(boost_max_line, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_add_flag(boost_max_line, LV_OBJ_FLAG_HIDDEN);
 
+  // Spitzenwert-Striche (Peak-Hold) aussen und innen am Ring, Lage setzt boost_peak_cb()
+  lv_obj_t **pk[2] = {&boost_peak_out, &boost_peak_in};
+  for (int i = 0; i < 2; i++) {
+    lv_obj_t *l = lv_line_create(scr);
+    lv_obj_set_pos(l, 0, 0);
+    lv_obj_set_style_line_color(l, lv_color_hex(C_RED), 0);
+    lv_obj_set_style_line_width(l, 4, 0);
+    lv_obj_set_style_line_rounded(l, true, 0);
+    lv_obj_clear_flag(l, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(l, LV_OBJ_FLAG_HIDDEN);
+    *pk[i] = l;
+  }
+  lv_timer_create(boost_peak_cb, 40, nullptr);
+
   // Knopf zur Oel-Suche (fuer Autos ohne Standard-PID 0x5C, z.B. VAG)
   lv_obj_t *bs = make_button(scr, 130, 32, C_MUTED, "OEL-SUCHE", &lv_font_montserrat_12);
   lv_obj_align(bs, LV_ALIGN_CENTER, 0, 150);
@@ -1272,17 +1546,13 @@ static void refresh_boost(void) {
   boostArcVal = constrain(boostArcVal, BOOST_ARC_MIN, BOOST_ARC_MAX);
   lv_arc_set_value(boost_arc, boostArcVal);
 
-  // Roter Strich beim bisherigen Maximum (erst sichtbar, sobald Ueberdruck erreicht wurde)
-  if (boostArcVal > boostMaxVal) {
-    boostMaxVal = boostArcVal;
-    float ang = (135.0f + 270.0f * (boostMaxVal - BOOST_ARC_MIN) / (float)(BOOST_ARC_MAX - BOOST_ARC_MIN))
-                * (float)M_PI / 180.0f;
-    const float c = LCD_WIDTH / 2.0f;
-    const float rOut = BOOST_RING_D / 2.0f + 2.0f;
-    const float rIn  = BOOST_RING_D / 2.0f - BOOST_RING_W - 2.0f;
-    boostMaxPts[0].x = c + rIn  * cosf(ang); boostMaxPts[0].y = c + rIn  * sinf(ang);
-    boostMaxPts[1].x = c + rOut * cosf(ang); boostMaxPts[1].y = c + rOut * sinf(ang);
-    lv_line_set_points(boost_max_line, boostMaxPts, 2);
+  // Roter Strich quer ueber den Ring beim hoechsten Ladedruck dieser Fahrt (erst sichtbar,
+  // sobald Ueberdruck erreicht wurde). Erfasst wird er auf jeder Seite (trip_update).
+  int mx = trip.boostMax > 0.0f ? constrain((int)lroundf(trip.boostMax * 100.0f), 1, BOOST_ARC_MAX) : 0;
+  if (mx > 0 && mx != boostMaxVal) {
+    boostMaxVal = mx;
+    boost_tick(boost_max_line, boostMaxPts, mx, BOOST_RING_D / 2.0f - BOOST_RING_W - 2.0f,
+               BOOST_RING_D / 2.0f + 2.0f);
     lv_obj_remove_flag(boost_max_line, LV_OBJ_FLAG_HIDDEN);
   }
 
@@ -1652,11 +1922,10 @@ static void refresh_accel(void) {
   // Z-Achse des Sensors statt auf X.
   // Seit der Nullausrichtung per RESET: Projektion auf die kalibrierten Achsen
   // (ohne Kalibrierung identisch zu gAz bzw. gAy).
-  const float a[3] = {gAx, gAy, gAz};
   // Vorzeichen beider Achsen umgedreht: der Punkt lief vorher bei Gas Richtung
   // BREMSEN und in Kurven zur falschen Seite.
-  float ax_g = -(vdot(a, gFwd) - gOffLong);  // Laengsachse (Bremsen/Gas)
-  float ay_g = -(vdot(a, gLat) - gOffLat);   // Querachse  (Links/Rechts)
+  float ax_g, ay_g;   // Laengsachse (Bremsen/Gas), Querachse (Links/Rechts)
+  gm_axes(ax_g, ay_g);
 
   float ax_abs = fabsf(ax_g);
   float ay_abs = fabsf(ay_g);
@@ -2243,7 +2512,7 @@ static void obdTask(void *param) {
 
   uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0, tTiming = 0;
   uint32_t tDtc = millis() - DTC_CHECK_MS + DTC_FIRST_MS;   // erste Pruefung kurz nach dem Start
-  PidBackoff boCat = {0, 0}, boTiming = {0, 0}, boIat = {0, 0};
+  PidBackoff boCat = {0, 0}, boTiming = {0, 0}, boIat = {0, 0}, boSpd = {0, 0};
   uint8_t oilFail = 0;
 
   for (;;) {
@@ -2313,6 +2582,7 @@ static void obdTask(void *param) {
     float cat = gCatTemp, timing = gTiming;
     bool catOk = gCatOK, timingOk = gTimingOK;
     int iat = gIntakeTemp; bool iatOk = gIntakeOK;
+    int spd = gSpeed; bool spdOk = gSpeedOK;
 
     uint32_t now = millis();
 
@@ -2357,6 +2627,14 @@ static void obdTask(void *param) {
 
       if (obdQuery("0105", "4105", a, b))
         cool = (int)a - 40;
+
+      // Geschwindigkeit: A km/h (fuer die Fahrt-Statistik)
+      if (pidDue(boSpd, now)) {
+        bool okS = obdQuery("010D", "410D", a, b);
+        if (okS) spd = a;
+        spdOk = okS;
+        pidResult(boSpd, okS, now);
+      }
 
       // Ansauglufttemperatur: A - 40 Grad C
       if (pidDue(boIat, now)) {
@@ -2445,6 +2723,7 @@ static void obdTask(void *param) {
     gCatTemp = cat; gCatOK = catOk;
     gTiming = timing; gTimingOK = timingOk;
     gIntakeTemp = iat; gIntakeOK = iatOk;
+    gSpeed = spd; gSpeedOK = spdOk;
     gElmOK = elmOk;
     gEcuOK = ecuOk;
     gNewData = true;
@@ -2480,6 +2759,7 @@ static void holdBacklightOff(void) {
 static void enterDeepSleep(void) {
   Serial.println("[SLEEP] Display aus, Deep Sleep");
   buzzer_stop();             // der IO-Expander haelt seinen Zustand auch im Schlaf
+  trip_save();
   LCD_Sleep();               // Hintergrundlicht + Panel aus
   CST820_AutoSleep(true);    // Touch stromsparend, meldet Beruehrung trotzdem per INT
   ledcDetach(LCD_BL_PIN);
@@ -2621,6 +2901,7 @@ void setup() {
                sHitCount, (int)sCoolCold);
     }
   }
+  trip_load();
   Serial.println("[LCD] OK");
 
   pinMode(CST820_INT_PIN, INPUT_PULLUP);
@@ -2653,6 +2934,7 @@ void setup() {
   build_page_boost();
   build_page_accel();
   build_page_oilscan();
+  build_page_trip();
   build_warn_box();
 
   show_page(load_page(), false);   // auf der zuletzt angezeigten Seite starten
@@ -2687,9 +2969,11 @@ void loop() {
   xSemaphoreGive(dataMutex);
 
   if (newData) {
+    trip_update();
     warn_check_temps();
     if (curPage == PAGE_MAIN) refresh_main();
     if (curPage == PAGE_BOOST) refresh_boost();
+    if (curPage == PAGE_TRIP) refresh_trip();
   }
 
   static uint32_t lastScanUi = 0;
@@ -2719,6 +3003,7 @@ void loop() {
     gAy += k * (accelData.accelY - gAy);
     gAz += k * (accelData.accelZ - gAz);
     lastMPU = millis();
+    trip_g();
   }
   if (gMpuOK && curPage == PAGE_ACCEL && millis() - lastAccelUi >= 100) {
     refresh_accel();
