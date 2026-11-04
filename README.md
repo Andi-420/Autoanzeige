@@ -42,7 +42,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | **Hauptseite** | Batteriespannung, Öltemperatur, Katalysatortemperatur (cyan < 300 °C, grün, orange > 850 °C, rot > 950 °C), Zündwinkel (° vor OT; orange wenn negativ = nach OT). Drehzahl und Kühlwasser zeigt schon das Kombiinstrument; sie werden intern weiter gelesen (Schaltblitz, Öl-Suche). In der Mitte der Status: `OBD OK` (alles gut), `ECU?` (Adapter ok, Auto antwortet nicht, z. B. Zündung aus), `ELM?` (Adapter antwortet nicht) |
 | **Ladedruck / Öl** | Großer Ladedruck-Ring außen, Öl-Ring innen, in der Mitte **BOOST** mit Wert in fetter Schrift. Ladedruck = Saugrohrdruck (PID 0x87, sonst 0x0B) − Umgebungsdruck (PID 0x33), Anzeige −0,6 … +2,0 bar. Ein **roter Strich** auf dem Ladedruck-Ring markiert das bisher erreichte Maximum dieser Fahrt (erscheint ab dem ersten Überdruck, wird beim Einschlafen/Aufwachen zurückgesetzt). Innerer Bogen: Öltemperatur (cyan bis 60 °C, türkisgrün bis 80 °C, grün bis 105 °C, darüber rot). Unter dem Ladedruck klein nebeneinander: **Öl** (links) und **Ansaugluft** (rechts; cyan, gelb ab 50 °C, rot ab 65 °C). **Schaltblitz:** ab 3500 U/min blinkt ein roter Ring am Rand (5× pro Sekunde; Schwelle `SHIFT_RPM` in `OBD.ino`). Knopf **OEL-SUCHE** öffnet die Öl-Suche (siehe unten) |
 | **Fehlercodes** | „AUSLESEN“ tippen, dann werden die gespeicherten Fehlercodes (Mode 03) angezeigt, z. B. `P0123` |
-| **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten |
+| **Helligkeit** | Slider und Presets 25/50/75/100 %. Die Einstellung bleibt nach einem Neustart erhalten. Knopf **WARNTEST** löst einen Probealarm aus (Hinweisfeld + Summer), Antippen des Hinweisfelds beendet ihn |
 | **G-Meter** | Längs- und Querbeschleunigung mit Max-Punkt. **RESET tippen** (Auto steht still, möglichst eben) übernimmt die momentane Lage des Geräts als neue Nullausrichtung und löscht die Max-Werte. Dabei wird die Schwerkraftrichtung gemessen und die Anzeige auf die waagerechte Längs- und Querachse umgerechnet, so dass auch ein stark schräger Einbau sauber ausgeglichen wird. Die Ausrichtung wird gespeichert und bleibt nach Neustart und Schlafmodus erhalten |
 
 ## Abgefragte Werte
@@ -58,6 +58,7 @@ Von der Hauptseite aus in die gewünschte Richtung wischen. Von jeder Unterseite
 | Katalysatortemperatur | 013C (Bank 1, Sensor 1): (A·256+B)/10 − 40 °C | 1 s |
 | Öltemperatur | `2211BD` an das Motorsteuergerät (7E0), Formel (A·256+B)/10 − 273,1 (Kelvin/10). Fest eingebaut; eine per Öl-Suche gespeicherte andere DID hat Vorrang | 1 s |
 | Umgebungsdruck | 0133 | 10 s (Startwert 101,3 kPa, bis der erste Messwert da ist) |
+| Fehlerspeicher | 03 (Rundruf an alle Steuergeräte) | 60 s im Hintergrund, erste Prüfung ca. 15 s nach dem Start (siehe Warnungen) |
 
 Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; Kat-Temperatur, Zündwinkel und Ansaugluft werden dann nach 5 Fehlversuchen nur noch alle 30 s erneut versucht.
 
@@ -67,6 +68,22 @@ Liefert das Auto einen Wert nicht (Antwort `NO DATA`), zeigt die Kachel `N/A`; K
 - Laut ScanMaster: ISO 15765-4 CAN 11 Bit / 500 kbit, Motorsteuergerät antwortet auf `7E8` (angefragt über `7E0`).
 - Das Protokoll wird automatisch erkannt (`ATSP0`, dann `ATDPN`). Startet die Anzeige vor der Zündung, ist es zunächst unbekannt und wird nachgeholt, sobald das Auto antwortet. Erst dann wird auf `7E0` umgeschaltet (vorher blieb die Öltemperatur in diesem Fall bis zum Neustart auf `N/A`). Die Fehlercode-Auswertung kann auch Antworten verarbeiten, die über mehrere CAN-Frames verteilt kommen.
 - Wenn der Adapter nicht mehr antwortet (3 leere Antworten hintereinander), wird er automatisch neu initialisiert.
+
+## Warnungen (Summer)
+
+Der Summer auf dem Board (am IO-Expander, EXIO8) piept, und über jeder Seite erscheint ein rotes Hinweisfeld:
+
+| Warnung | Auslöser | Ton | Antippen des Hinweisfelds |
+|---|---|---|---|
+| **Kühlwasser** | über **105 °C** | 3× kurz, jede Minute wiederholt | quittiert: still, bis die Temperatur wieder unter 100 °C war |
+| **Öl zu heiß** | über **120 °C** | 3× kurz, jede Minute wiederholt | quittiert: still, bis die Temperatur wieder unter 115 °C war |
+| **Neuer Fehlercode** | ein Code, der beim letzten Auslesen noch nicht da war | 2× lang, einmalig | öffnet die Fehlercode-Seite |
+
+- Temperaturwarnungen gelten nur, solange das Steuergerät antwortet. Ein einzelner Lesefehler beendet sie nicht; Zündung aus schon.
+- **Fehlerspeicher-Prüfung:** Der OBD-Task liest jede Minute im Hintergrund Mode 03. Das dauert normalerweise 0,1–0,3 s; nur in dieser Zeit stehen die OBD-Werte (Ladedruck, Drehzahl …) kurz still. Anzeige, Touch und G-Meter laufen auf dem anderen Prozessorkern ungebremst weiter. Ab `SHIFT_RPM` (3500 U/min) wird die Prüfung verschoben, damit beim Ausdrehen kein Ladedruck-Spitzenwert fehlt. Die Dauer jeder Prüfung steht im seriellen Monitor (`[DTC] Pruefung: … (120 ms)`).
+- Die zuletzt bekannte Fehlerliste wird gespeichert (NVS). Ein Code, der dauerhaft im Speicher steht, meldet sich daher nur **einmal**, nicht nach jedem Aufwachen. Nach dem Löschen gilt ein wieder auftauchender Code wieder als neu. Beim allerersten Start mit der neuen Version gelten vorhandene Codes als neu.
+- Das Ergebnis der Hintergrundprüfung erscheint auch auf der Fehlercode-Seite; wer dort gerade ist, bekommt keinen Alarm.
+- Schwellen und Intervalle oben in `OBD.ino`: `WARN_OIL_C`, `WARN_COOL_C`, `WARN_HYST_C`, `WARN_REPEAT_MS`, `DTC_CHECK_MS`.
 
 ## Schlafmodus (dauerhaft am OBD-Stecker)
 

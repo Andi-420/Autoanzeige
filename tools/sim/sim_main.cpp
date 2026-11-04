@@ -63,6 +63,16 @@ int main(){
     char fn[64]; snprintf(fn,64,"out_%s.ppm",names[p]); save(fn);
     printf("Seite %s:\n",names[p]); total+=check(screens[p],names[p]);
   }
+  // Warn-Hinweisfeld (oberste Ebene) ueber der Hauptseite: zu heisses Oel
+  build_warn_box();
+  gOilTemp=123; warn_check_temps(); warn_update();
+  curPage=PAGE_MAIN; refresh_main(); lv_screen_load(screens[PAGE_MAIN]); fakeMs+=1000; lv_refr_now(display);
+  save("out_warn_oil.ppm"); printf("Seite warn_oil:\n"); total+=check(lv_layer_top(),"warn_oil");
+  // Neuer Fehlercode ueber der Ladedruckseite (Kuehlwasser/Oel wieder normal)
+  gOilTemp=95; gCoolant=90; warn_check_temps();
+  dtcCount=2; dtcList[0]="P0301"; dtcList[1]="P0420"; dtc_check_new(); warn_update();
+  curPage=PAGE_BOOST; refresh_boost(); lv_screen_load(screens[PAGE_BOOST]); fakeMs+=1000; lv_refr_now(display);
+  save("out_warn_dtc.ppm"); printf("Seite warn_dtc:\n"); total+=check(lv_layer_top(),"warn_dtc");
   printf("Gesamt ausserhalb: %d\n",total);
   return total ? 1 : 0;
 }
