@@ -5,6 +5,7 @@ struct Preferences {
   uint8_t getUChar(const char*, uint8_t d) { return d; }   void putUChar(const char*, uint8_t) {}
   uint16_t getUShort(const char*, uint16_t d) { return d; } void putUShort(const char*, uint16_t) {}
   float getFloat(const char*, float d) { return d; }       void putFloat(const char*, float) {}
+  String getString(const char*, const String &d) { return d; } size_t putString(const char*, const String &v) { return v.length(); }
   size_t getBytesLength(const char*) { return 0; }
   size_t getBytes(const char*, void*, size_t) { return 0; }
   size_t putBytes(const char*, const void*, size_t n) { return n; }

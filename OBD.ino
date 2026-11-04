@@ -14,6 +14,9 @@
  * G-Meter: RESET tippen (Auto steht) = aktuelle Einbaulage wird neue
  *          Nullausrichtung (dauerhaft im NVS) + Max-Werte loeschen
  *
+ * Warnungen: Summer + Hinweisfeld bei Oel > 120 C, Kuehlwasser > 105 C und
+ *          neuem Fehlercode (Fehlerspeicher wird jede Minute geprueft)
+ *
  * ELM327: UART1, GPIO43(TX)/GPIO44(RX) + MAX232A
  * IMU:    I2C (GPIO7=SCL, GPIO15=SDA)
  *
@@ -163,6 +166,18 @@ static volatile int gScanCmd = SCMD_NONE;
 #define LCD_BL_GPIO       GPIO_NUM_6 // Hintergrundlicht (LCD_BL_PIN), im Schlaf fest auf LOW
 #define TOUCH_INT_GPIO    GPIO_NUM_16// CST820_INT_PIN, Weckquelle
 
+// ── Warnungen: Summer + Hinweisfeld ueber jeder Seite ─────────────
+#define WARN_OIL_C        120        // Oeltemperatur ueber ... Grad C
+#define WARN_COOL_C       105        // Kuehlwasser ueber ... Grad C
+#define WARN_HYST_C       5          // erst wieder scharf, wenn 5 K unter der Schwelle
+#define WARN_REPEAT_MS    60000UL    // Temperaturwarnung piept jede Minute erneut, bis quittiert
+#define DTC_CHECK_MS      60000UL    // Fehlerspeicher im Hintergrund pruefen (jede Minute)
+#define DTC_FIRST_MS      15000UL    // erste Pruefung ca. 15 s nach dem Start
+#define WARN_COOL         0          // Reihenfolge = Wichtigkeit (Hinweisfeld zeigt die erste)
+#define WARN_OIL          1
+#define WARN_DTC          2
+#define WARN_COUNT        3
+
 // Ueberleben den Deep Sleep (RTC-Speicher)
 RTC_DATA_ATTR static char  rtcProto = 0;      // zuletzt erkanntes ELM-Protokoll ('6' usw.), 0 = unbekannt
 RTC_DATA_ATTR static float rtcBatt = 0.0f;    // letzte gemessene Spannung
@@ -177,6 +192,13 @@ static volatile int  gSleepIn = -1;           // Sekunden bis zum Schlaf (Anzeig
 // Funktions-Prototypen vor die erste Funktion - ein spaeter definierter Typ
 // fuehrt dort zu "does not name a type".
 struct PidBackoff { uint8_t fail; uint32_t tRetry; };   // Backoff fuer nicht unterstuetzte PIDs
+
+struct Warn {                       // nur im LVGL-Task benutzt
+  bool     active;                  // Bedingung erfuellt (bzw. neuer Fehlercode gemeldet)
+  bool     acked;                   // angetippt: kein Hinweis/Piepen mehr, bis die Bedingung endet
+  uint32_t lastBeep;                // 0 = noch nicht gepiept
+};
+static Warn warns[WARN_COUNT] = {};
 
 struct ScanStatus {                 // unter Mutex
   int     phase;
@@ -304,7 +326,7 @@ static void show_page(int idx, bool anim) {
   switch (idx) {
     case PAGE_MAIN:  refresh_main();   break;
     case PAGE_BOOST: refresh_boost();  break;
-    case PAGE_DTC:   refresh_dtc_ui(); break;
+    case PAGE_DTC:   refresh_dtc_ui(); warns[WARN_DTC].active = false; break;
     case PAGE_ACCEL: refresh_accel();  break;
     case PAGE_OILSCAN: refresh_oilscan(); break;
     default: break;
@@ -761,6 +783,200 @@ static void refresh_dtc_ui(void) {
 }
 
 // ══════════════════════════════════════════════════════════════════
+// WARNUNGEN: Summer (EXIO8 am TCA9554) + Hinweisfeld ueber allen Seiten
+// Oel > WARN_OIL_C, Kuehlwasser > WARN_COOL_C, neuer Fehlercode.
+// Laeuft komplett im LVGL-Task (Core 1): dort liegen auch Touch und IMU am I2C-Bus.
+// ══════════════════════════════════════════════════════════════════
+static const uint16_t BEEP_TEMP[] = {150, 100, 150, 100, 150, 0};  // an, aus, an, ... in ms; 0 = Ende
+static const uint16_t BEEP_DTC[]  = {500, 250, 500, 0};
+static const uint16_t *bzPat = nullptr;
+static uint8_t  bzIdx = 0;
+static uint32_t bzT = 0;
+static bool     bzOn = false;
+
+static void buzzer_set(bool on) {
+  if (on == bzOn) return;          // nur bei Aenderung auf den I2C-Bus
+  bzOn = on;
+  Set_EXIO(EXIO_PIN8, on ? High : Low);
+}
+
+static void buzzer_start(const uint16_t *pat) {
+  bzPat = pat; bzIdx = 0; bzT = millis();
+  buzzer_set(true);
+}
+
+static void buzzer_stop(void) {
+  bzPat = nullptr;
+  buzzer_set(false);
+}
+
+// Ohne Warten: wird aus loop() aufgerufen und schaltet nach Ablauf der Zeit weiter
+static void buzzer_tick(void) {
+  if (!bzPat || millis() - bzT < bzPat[bzIdx]) return;
+  bzT = millis();
+  if (bzPat[++bzIdx] == 0) { buzzer_stop(); return; }
+  buzzer_set((bzIdx & 1) == 0);    // gerade Stelle = an, ungerade = aus
+}
+
+static lv_obj_t *warn_box = nullptr;
+static lv_obj_t *warn_title = nullptr;
+static lv_obj_t *warn_text = nullptr;
+static int  warnShown = -1;        // angezeigte Warnung, -1 = keine
+static int  warnOil = 0, warnCool = 0;
+static char warnDtc[24] = "";      // z.B. "P0301" oder "P0301 +1"
+static bool warnTest = false;      // Probealarm von der Helligkeitsseite
+
+static void build_warn_box(void) {
+  // Oberste Ebene: liegt ueber jeder Seite und bleibt beim Seitenwechsel stehen
+  warn_box = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(warn_box, 340, 118);
+  lv_obj_center(warn_box);
+  lv_obj_set_style_bg_color(warn_box, lv_color_hex(0x40000A), 0);
+  lv_obj_set_style_bg_opa(warn_box, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_color(warn_box, lv_color_hex(C_RED), 0);
+  lv_obj_set_style_border_width(warn_box, 3, 0);
+  lv_obj_set_style_radius(warn_box, 20, 0);
+  lv_obj_set_style_pad_all(warn_box, 8, 0);
+  lv_obj_set_style_pad_row(warn_box, 4, 0);
+  lv_obj_clear_flag(warn_box, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_flex_flow(warn_box, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(warn_box, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+  warn_title = lv_label_create(warn_box);
+  lv_obj_set_style_text_font(warn_title, &lv_font_montserrat_24, 0);
+  lv_obj_set_style_text_color(warn_title, lv_color_hex(C_WHITE), 0);
+  lv_label_set_text(warn_title, "");
+
+  warn_text = lv_label_create(warn_box);
+  lv_obj_set_style_text_font(warn_text, &lv_font_montserrat_16, 0);
+  lv_obj_set_style_text_color(warn_text, lv_color_hex(C_WHITE), 0);
+  lv_obj_set_style_text_align(warn_text, LV_TEXT_ALIGN_CENTER, 0);
+  lv_label_set_text(warn_text, "");
+
+  // Antippen: Temperatur = quittieren (still, bis sie wieder unter die Schwelle faellt),
+  // Fehlercode = Fehlercode-Seite oeffnen
+  lv_obj_add_event_cb(warn_box, [](lv_event_t*e){
+    int w = warnShown;
+    if (w < 0) return;
+    warns[w].acked = true;
+    buzzer_stop();
+    if (warnTest) { warnTest = false; warns[WARN_OIL].active = false; }
+    if (w == WARN_DTC) { warns[w].active = false; goto_page(PAGE_DTC); }
+  }, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_add_flag(warn_box, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void warn_raise(int i) {
+  Warn &w = warns[i];
+  w.active = true; w.acked = false; w.lastBeep = 0;
+}
+
+// Temperaturwarnung mit Schalt-Abstand (Hysterese). Ein einzelner Lesefehler
+// aendert nichts; erst wenn das Steuergeraet ganz schweigt (Zuendung aus), endet sie.
+static void temp_warn(int i, bool ecuOk, bool valid, int val, int limit) {
+  Warn &w = warns[i];
+  if (!ecuOk) { w.active = false; return; }
+  if (!valid) return;
+  if (val > limit) {
+    if (!w.active) {
+      warn_raise(i);
+      Serial.printf("[WARN] %s %d C (Grenze %d C)\n", i == WARN_OIL ? "Oel" : "Kuehlwasser", val, limit);
+    }
+  } else if (val <= limit - WARN_HYST_C) {
+    w.active = false;
+  }
+}
+
+// Nach jedem neuen OBD-Datensatz (unabhaengig von der angezeigten Seite)
+static void warn_check_temps(void) {
+  int oil, cool; bool oilOk, ecuOk;
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  oil = gOilTemp; oilOk = gOilOK; cool = gCoolant; ecuOk = gEcuOK;
+  xSemaphoreGive(dataMutex);
+  warnCool = cool;
+  temp_warn(WARN_COOL, ecuOk, true, cool, WARN_COOL_C);
+  if (warnTest) return;            // Probealarm nicht gleich wieder beenden
+  warnOil = oil;
+  temp_warn(WARN_OIL, ecuOk, oilOk, oil, WARN_OIL_C);
+}
+
+// Neuer Fehlercode? Vergleich mit der zuletzt bekannten Liste (im NVS, uebersteht
+// Schlafmodus und Neustart; ein dauerhaft gespeicherter Code meldet sich also nur einmal).
+// Geloeschte Codes fallen aus der Liste: tauchen sie wieder auf, gelten sie wieder als neu.
+static void dtc_check_new(void) {
+  static String known;
+  static bool loaded = false;
+  if (!loaded) { known = prefs.getString("dtcKnown", ""); loaded = true; }
+
+  int count, state;
+  String codes[DTC_MAX];
+  xSemaphoreTake(dataMutex, portMAX_DELAY);
+  count = dtcCount; state = gDtcState;
+  for (int i = 0; i < count; i++) codes[i] = dtcList[i];
+  xSemaphoreGive(dataMutex);
+  if (state != DTC_DONE) return;
+
+  String now = "";
+  int nNew = 0;
+  String first = "";
+  for (int i = 0; i < count; i++) {
+    String c = codes[i] + ",";     // "P0123," - feste Laenge, keine Teiltreffer
+    now += c;
+    if (known.indexOf(c) < 0) { if (!nNew) first = codes[i]; nNew++; }
+  }
+  if (now != known) {
+    known = now;
+    prefs.putString("dtcKnown", now);
+  }
+  if (!nNew) return;
+  Serial.printf("[WARN] %d neue(r) Fehlercode(s), z.B. %s\n", nNew, first.c_str());
+  if (curPage == PAGE_DTC) return; // steht schon auf dem Bildschirm
+  if (nNew > 1) snprintf(warnDtc, sizeof(warnDtc), "%s +%d", first.c_str(), nNew - 1);
+  else          snprintf(warnDtc, sizeof(warnDtc), "%s", first.c_str());
+  warn_raise(WARN_DTC);
+}
+
+// Jede loop()-Runde: Summer weiterschalten, Piepen ausloesen, Hinweisfeld pflegen
+static void warn_update(void) {
+  buzzer_tick();
+  uint32_t now = millis();
+  int top = -1;
+  for (int i = 0; i < WARN_COUNT; i++) {
+    Warn &w = warns[i];
+    if (!w.active || w.acked) continue;
+    if (top < 0) top = i;
+    bool due = w.lastBeep == 0 || (i != WARN_DTC && now - w.lastBeep >= WARN_REPEAT_MS);
+    if (due && !bzPat) {           // laeuft gerade ein Ton, kommt der naechste danach
+      buzzer_start(i == WARN_DTC ? BEEP_DTC : BEEP_TEMP);
+      w.lastBeep = now ? now : 1;
+    }
+  }
+  if (!warn_box) return;
+  if (top < 0) {
+    if (warnShown >= 0) lv_obj_add_flag(warn_box, LV_OBJ_FLAG_HIDDEN);
+    warnShown = -1;
+    return;
+  }
+  char t[24], x[64];
+  if (top == WARN_COOL) {
+    snprintf(t, sizeof(t), LV_SYMBOL_WARNING " KUEHLWASSER");
+    snprintf(x, sizeof(x), "%d \xC2\xB0" "C  (Grenze %d)\nTippen = ausblenden", warnCool, WARN_COOL_C);
+  } else if (top == WARN_OIL) {
+    snprintf(t, sizeof(t), LV_SYMBOL_WARNING " OEL ZU HEISS");
+    if (warnTest) snprintf(x, sizeof(x), "PROBEALARM\nTippen = ausblenden");
+    else snprintf(x, sizeof(x), "%d \xC2\xB0" "C  (Grenze %d)\nTippen = ausblenden", warnOil, WARN_OIL_C);
+  } else {
+    snprintf(t, sizeof(t), LV_SYMBOL_WARNING " FEHLERCODE");
+    snprintf(x, sizeof(x), "Neu: %s\nTippen = anzeigen", warnDtc);
+  }
+  if (strcmp(lv_label_get_text(warn_title), t)) lv_label_set_text(warn_title, t);
+  if (strcmp(lv_label_get_text(warn_text), x))  lv_label_set_text(warn_text, x);
+  if (warnShown < 0) lv_obj_remove_flag(warn_box, LV_OBJ_FLAG_HIDDEN);
+  warnShown = top;
+}
+
+// ══════════════════════════════════════════════════════════════════
 // SEITE 2: HELLIGKEIT (SLIDER)
 // ══════════════════════════════════════════════════════════════════
 static lv_obj_t *lbl_bright_val = nullptr;
@@ -846,6 +1062,14 @@ static void build_page_brightness(void) {
       lv_obj_align(lbl_bright_val, LV_ALIGN_CENTER, 0, -40);
     }, LV_EVENT_CLICKED, nullptr);
   }
+
+  // Probealarm: zeigt das Hinweisfeld und piept wie bei zu heissem Oel
+  lv_obj_t *bt = make_button(scr, 150, 30, C_RED, LV_SYMBOL_BELL " WARNTEST", &lv_font_montserrat_14);
+  lv_obj_align(bt, LV_ALIGN_TOP_MID, 0, 386);
+  lv_obj_add_event_cb(bt, [](lv_event_t*e){
+    warnTest = true;
+    warn_raise(WARN_OIL);
+  }, LV_EVENT_CLICKED, nullptr);
 
   add_nav_dots(scr, PAGE_BRIGHT);
 }
@@ -1696,14 +1920,21 @@ static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
   return any ? count : -1;
 }
 
-static void elmFetchDTC(void) {
+// Fehlerspeicher lesen (Mode 03). background = minuetliche Pruefung im Fahrbetrieb:
+// Eine unbrauchbare Antwort aendert dann nichts an der Fehlercode-Seite, und die
+// Wartezeit ist kuerzer (normal antworten die Steuergeraete in ca. 0,1-0,3 s).
+static void elmFetchDTC(bool background) {
+  uint32_t t0 = millis();
   bool wasPhys = sHdrPhys;
   elmHeader(false);   // Fehlercodes aller Steuergeraete (Rundruf)
-  String resp = elmSendCmd("03", 5000);
+  String resp = elmSendCmd("03", background ? 2500 : 5000);
   elmHeader(wasPhys);
   char codes[DTC_MAX][6];
   int n = resp.length() ? dtc_parse(resp.c_str(), gIsCan, codes, DTC_MAX) : -1;
-  Serial.printf("[DTC] Antwort '%s' -> %d\n", resp.c_str(), n);
+  resp.replace("\n", " ");
+  Serial.printf("[DTC] %s: Antwort '%s' -> %d (%lu ms)\n", background ? "Pruefung" : "Auslesen",
+                resp.c_str(), n, (unsigned long)(millis() - t0));
+  if (n < 0 && background) return;
 
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   if (n >= 0) {
@@ -2011,13 +2242,14 @@ static void obdTask(void *param) {
   elmInit();
 
   uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0, tTiming = 0;
+  uint32_t tDtc = millis() - DTC_CHECK_MS + DTC_FIRST_MS;   // erste Pruefung kurz nach dem Start
   PidBackoff boCat = {0, 0}, boTiming = {0, 0}, boIat = {0, 0};
   uint8_t oilFail = 0;
 
   for (;;) {
     if (gFetchDTC) {
       gFetchDTC = false;
-      elmFetchDTC();
+      elmFetchDTC(false);
     }
 
     bool ok;
@@ -2181,6 +2413,15 @@ static void obdTask(void *param) {
         ambKPa = (float)a; // PID 0x33 = absoluter Umgebungs-/Barometerdruck in kPa
     }
 
+    // ── Fehlerspeicher: jede Minute im Hintergrund (fuer die Warnung bei neuem Code) ──
+    // Dauert ca. 0,1-0,3 s; solange stehen nur die OBD-Werte kurz still, Anzeige,
+    // Touch und G-Meter laufen auf dem anderen Kern weiter. Beim Ausdrehen (ab
+    // SHIFT_RPM) wird die Pruefung verschoben, damit der Ladedruck-Spitzenwert nicht fehlt.
+    if (sProtoKnown && sEcuFail == 0 && rpm < SHIFT_RPM && now - tDtc >= DTC_CHECK_MS) {
+      tDtc = now;
+      elmFetchDTC(true);
+    }
+
     boostBar = (mapKPa - ambKPa) / 100.0f; // kPa -> bar
     if (boostBar < -0.6f) boostBar = -0.6f;
     if (boostBar > 2.0f)  boostBar = 2.0f;
@@ -2238,6 +2479,7 @@ static void holdBacklightOff(void) {
 // Aus dem laufenden Betrieb einschlafen (LVGL-Task, nachdem der OBD-Task gSleepNow gesetzt hat)
 static void enterDeepSleep(void) {
   Serial.println("[SLEEP] Display aus, Deep Sleep");
+  buzzer_stop();             // der IO-Expander haelt seinen Zustand auch im Schlaf
   LCD_Sleep();               // Hintergrundlicht + Panel aus
   CST820_AutoSleep(true);    // Touch stromsparend, meldet Beruehrung trotzdem per INT
   ledcDetach(LCD_BL_PIN);
@@ -2411,6 +2653,7 @@ void setup() {
   build_page_boost();
   build_page_accel();
   build_page_oilscan();
+  build_warn_box();
 
   show_page(load_page(), false);   // auf der zuletzt angezeigten Seite starten
   lv_task_handler();
@@ -2444,6 +2687,7 @@ void loop() {
   xSemaphoreGive(dataMutex);
 
   if (newData) {
+    warn_check_temps();
     if (curPage == PAGE_MAIN) refresh_main();
     if (curPage == PAGE_BOOST) refresh_boost();
   }
@@ -2458,7 +2702,11 @@ void loop() {
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   if (gNewDTC) { newDTC = true; gNewDTC = false; }
   xSemaphoreGive(dataMutex);
-  if (newDTC && curPage == PAGE_DTC) refresh_dtc_ui();
+  if (newDTC) {
+    dtc_check_new();
+    if (curPage == PAGE_DTC) refresh_dtc_ui();
+  }
+  warn_update();
 
   // IMU mit 50 Hz lesen und glaetten (Motor-/Strassenvibrationen),
   // Anzeige aber nur mit 10 Hz aktualisieren
