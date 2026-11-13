@@ -40,7 +40,7 @@ class String {
   String& operator+=(char c){s+=c;return *this;}
   String& operator+=(const String&t){s+=t.s;return *this;}
   bool operator!=(const String&t)const{return s!=t.s;}
-  bool operator==(const char*c)const{return s==c;} bool operator!=(const char*c)const{return s!=c;}
+  bool operator==(const char*c)const{return s==c;} bool operator==(const String&o)const{return s==o.s;} bool operator!=(const char*c)const{return s!=c;}
   friend String operator+(const String&a,const String&b){return String(a.s+b.s);}
   friend String operator+(const String&a,const char*b){return String(a.s+b);}
 };
