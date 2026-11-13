@@ -309,6 +309,12 @@ static void gm_axes(float &lon, float &lat) {
 #define DTC_MAX 10
 static String dtcList[DTC_MAX];
 static int dtcCount = 0;
+// Anstehende Fehlercodes (Mode 07): vom Steuergeraet bemerkt, aber noch nicht fest
+// gespeichert. Werden nur beim Antippen von AUSLESEN gelesen, nie geloescht.
+#define PEND_UNREAD (-2)   // noch nie gelesen
+#define PEND_ERROR  (-1)   // Abfrage ohne brauchbare Antwort
+static String pendList[DTC_MAX];
+static int pendCount = PEND_UNREAD;
 
 // Helligkeit (wird im NVS-Flash gespeichert und beim Start geladen)
 static uint8_t gBrightness = 80;
@@ -797,13 +803,15 @@ static void build_page_dtc(void) {
 static void refresh_dtc_ui(void) {
   lv_obj_clean(dtc_list_obj);
   char buf[32];
-  int count, state;
-  String codes[DTC_MAX];
+  int count, state, pend;
+  String codes[DTC_MAX], pcodes[DTC_MAX];
 
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   count = dtcCount;
   state = gDtcState;
+  pend = pendCount;
   for (int i=0; i<count; i++) codes[i] = dtcList[i];
+  for (int i=0; i<pend; i++) pcodes[i] = pendList[i];
   xSemaphoreGive(dataMutex);
 
   if (state != DTC_DONE) {
@@ -824,10 +832,27 @@ static void refresh_dtc_ui(void) {
     lv_obj_set_style_text_color(l, lv_color_hex(C_RED), 0);
   }
 
-  snprintf(buf, sizeof(buf), "%d Fehlercode(s)", count);
-  lv_label_set_text(lbl_dtc_count, buf);
+  // Anstehende Codes (Mode 07) in Orange darunter; was schon gespeichert ist, nicht doppelt
+  int nPend = 0;
+  for (int i=0; i<pend; i++) {
+    bool dup = false;
+    for (int k=0; k<count; k++) if (codes[k] == pcodes[i]) { dup = true; break; }
+    if (dup) continue;
+    nPend++;
+    lv_obj_t *l = lv_label_create(dtc_list_obj);
+    lv_label_set_text_fmt(l, "%s  anstehend", pcodes[i].c_str());
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(C_ORANGE), 0);
+  }
+
+  char cb[72];
+  if (pend == PEND_UNREAD)     snprintf(cb, sizeof(cb), "%d gespeichert\nanstehende: AUSLESEN tippen", count);
+  else if (pend == PEND_ERROR) snprintf(cb, sizeof(cb), "%d gespeichert\nanstehende nicht lesbar", count);
+  else                         snprintf(cb, sizeof(cb), "%d gespeichert, %d anstehend", count, nPend);
+  lv_label_set_text(lbl_dtc_count, cb);
+  lv_obj_set_style_text_align(lbl_dtc_count, LV_TEXT_ALIGN_CENTER, 0);
   lv_obj_set_style_text_color(lbl_dtc_count,
-    lv_color_hex(count>0?C_RED:C_GREEN), 0);
+    lv_color_hex(count>0 ? C_RED : nPend>0 ? C_ORANGE : C_GREEN), 0);
   lv_obj_align(lbl_dtc_count, LV_ALIGN_CENTER, 0, 98);
 }
 
@@ -1526,24 +1551,28 @@ static void build_page_boost(void) {
 static void refresh_boost(void) {
   float boostBar;
   int oil, rpm;
-  bool oilOk;
+  bool oilOk, ecuOk;
   xSemaphoreTake(dataMutex, portMAX_DELAY);
   boostBar = gBoostBar;
   oil = gOilTemp;
   oilOk = gOilOK;
   rpm = gRPM;
+  ecuOk = gEcuOK;
   xSemaphoreGive(dataMutex);
 
-  shiftActive = rpm >= SHIFT_RPM;   // Blinken selbst macht shift_blink_cb
+  shiftActive = ecuOk && rpm >= SHIFT_RPM;   // Blinken selbst macht shift_blink_cb
 
   // ── Ladedruck-Arc + Label ───────────────────────────────────
+  // Steuergeraet schweigt (Zuendung aus): kein alter Wert, sondern N/A und leerer Ring
   char buf[16];
-  snprintf(buf, sizeof(buf), "%+.2f", boostBar);
+  if (ecuOk) snprintf(buf, sizeof(buf), "%+.2f", boostBar);
+  else       snprintf(buf, sizeof(buf), "N/A");
   lv_label_set_text(lbl_boost_val, buf);
   lv_obj_align(lbl_boost_val, LV_ALIGN_CENTER, 0, BOOST_Y_VAL);
 
   int boostArcVal = (int)roundf(boostBar * 100.0f); // bar -> centibar
   boostArcVal = constrain(boostArcVal, BOOST_ARC_MIN, BOOST_ARC_MAX);
+  if (!ecuOk) boostArcVal = BOOST_ARC_MIN;
   lv_arc_set_value(boost_arc, boostArcVal);
 
   // Roter Strich quer ueber den Ring beim hoechsten Ladedruck dieser Fahrt (erst sichtbar,
@@ -1560,6 +1589,7 @@ static void refresh_boost(void) {
                      : boostBar > 0.5f ? C_ORANGE
                      : boostBar < 0.0f ? C_CYAN   // Unterdruck = cyan
                      : C_PURPLE;
+  if (!ecuOk) boostCol = C_MUTED;
   lv_obj_set_style_arc_color(boost_arc, lv_color_hex(boostCol), LV_PART_INDICATOR);
   lv_obj_set_style_text_color(lbl_boost_val, lv_color_hex(boostCol), 0);
 
@@ -2048,6 +2078,20 @@ static int elmParseOBDBytes(const String &resp, const char *tag, uint8_t *out, i
 // CAN-Adressierung: 7DF = Rundruf an alle Steuergeraete (Standard),
 // 7E0 = direkt an das Motorsteuergeraet (noetig fuer Mode 22 / UDS)
 static bool sHdrPhys = false;
+
+// Schnellabfrage: Eine "1" hinter der Anfrage ("010C1") sagt dem ELM327, dass genau eine
+// Antwort kommt. Er liefert sie dann sofort, statt jedes Mal abzuwarten, ob noch ein
+// weiteres Steuergeraet antwortet. Nachbauten kennen das nicht immer, deshalb wird es nach
+// jedem ELM-Start erst an der Drehzahl ausprobiert (abwechselnd mit und ohne "1") und nur
+// benutzt, wenn es dort funktioniert. FAST_QUERY 0 schaltet es ganz ab.
+#define FAST_QUERY 1
+#define FAST_TRY 0     // wird noch ausprobiert: alle anderen Abfragen laufen ohne "1"
+#define FAST_ON  1
+#define FAST_OFF 2
+static uint8_t sFast = FAST_QUERY ? FAST_TRY : FAST_OFF;
+static bool    sFastTurn = false;     // Testphase: diese Runde mit "1"?
+static bool    sFastPlainOk = false;  // Testphase: letzte Abfrage ohne "1" hat geklappt
+static uint8_t sFastBad = 0;          // Testphase: ohne "1" ok, mit "1" nicht (hintereinander)
 static void elmHeader(bool phys) {
   // Erst umschalten, wenn das Protokoll sicher als CAN erkannt ist
   if (!sProtoKnown || !gIsCan || phys == sHdrPhys) return;
@@ -2075,6 +2119,8 @@ static void elmInit(void) {
   sHdrPhys = false;   // ATZ setzt den Header zurueck
   sProtoKnown = false;
   sMapProbed = false;
+  sFast = FAST_QUERY ? FAST_TRY : FAST_OFF;
+  sFastTurn = false; sFastPlainOk = false; sFastBad = 0;
   String ver = elmSendCmd("ATZ", 3000);
   if (!ver.length()) {
     Serial.println("[ELM] keine Antwort");
@@ -2097,12 +2143,13 @@ static void elmInit(void) {
   Serial.println("[ELM] OK");
 }
 
-// ── DTC-Auswertung (Mode 03) ────────────────────────────────────────
+// ── DTC-Auswertung (Mode 03 / 07) ────────────────────────────────────────
 // Reine C-Funktion ohne Arduino-Abhaengigkeiten (auf dem PC testbar).
 // resp: ELM-Antwort, Zeilen durch '\n' getrennt, mit/ohne Leerzeichen.
 //   CAN, 1 Frame:      "43 02 01 23 04 56"          (Byte nach 43 = Anzahl)
 //   CAN, Multi-Frame:  "00A\n0: 43 04 01 23 04 56\n1: 07 89 0A BC 00 00"
 //   K-Line/J1850:      "43 01 23 04 56 00 00"       (je Zeile 3 Codes, 0000 = leer)
+// tag: "43" = gespeicherte Codes (Mode 03), "47" = anstehende Codes (Mode 07), gleicher Aufbau.
 // Liefert Anzahl Codes, oder -1 wenn keine gueltige Antwort.
 static void dtc_format(uint8_t b1, uint8_t b2, char *out) {
   static const char pfx[] = {'P', 'C', 'B', 'U'};
@@ -2117,7 +2164,7 @@ static int hexval(char c) {
   return -1;
 }
 
-static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
+static int dtc_parse(const char *resp, const char *tag, bool isCan, char out[][6], int maxOut) {
   // 1) In Nachrichten zerlegen: je Nachricht nur Hex-Zeichen sammeln
   const int MAXMSG = 8, MAXHEX = 128;
   char msgs[MAXMSG][MAXHEX + 1];
@@ -2151,7 +2198,7 @@ static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
     }
 
     if (!cont) {
-      if (strncmp(data, "43", 2) != 0 || nMsg >= MAXMSG) continue;
+      if (strncmp(data, tag, 2) != 0 || nMsg >= MAXMSG) continue;
       msgs[nMsg][0] = 0;
       nMsg++;
     } else if (nMsg == 0) {
@@ -2163,7 +2210,7 @@ static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
   // 2) Nachrichten dekodieren
   int count = 0;
   for (int m = 0; m < nMsg; m++) {
-    const char *h = msgs[m] + 2;   // hinter "43"
+    const char *h = msgs[m] + 2;   // hinter "43" bzw. "47"
     int len = strlen(h);
     int num;
     if (isCan) {
@@ -2189,7 +2236,9 @@ static int dtc_parse(const char *resp, bool isCan, char out[][6], int maxOut) {
   return any ? count : -1;
 }
 
-// Fehlerspeicher lesen (Mode 03). background = minuetliche Pruefung im Fahrbetrieb:
+// Fehlerspeicher lesen (Mode 03). Beim Antippen von AUSLESEN zusaetzlich die anstehenden
+// Codes (Mode 07). Beides liest nur; geloescht (Mode 04) wird hier nie.
+// background = minuetliche Pruefung im Fahrbetrieb (nur Mode 03, damit sie kurz bleibt):
 // Eine unbrauchbare Antwort aendert dann nichts an der Fehlercode-Seite, und die
 // Wartezeit ist kuerzer (normal antworten die Steuergeraete in ca. 0,1-0,3 s).
 static void elmFetchDTC(bool background) {
@@ -2197,9 +2246,16 @@ static void elmFetchDTC(bool background) {
   bool wasPhys = sHdrPhys;
   elmHeader(false);   // Fehlercodes aller Steuergeraete (Rundruf)
   String resp = elmSendCmd("03", background ? 2500 : 5000);
+  String resp7;
+  if (!background) resp7 = elmSendCmd("07", 5000);
   elmHeader(wasPhys);
-  char codes[DTC_MAX][6];
-  int n = resp.length() ? dtc_parse(resp.c_str(), gIsCan, codes, DTC_MAX) : -1;
+  char codes[DTC_MAX][6], pcodes[DTC_MAX][6];
+  int n = resp.length() ? dtc_parse(resp.c_str(), "43", gIsCan, codes, DTC_MAX) : -1;
+  int n7 = resp7.length() ? dtc_parse(resp7.c_str(), "47", gIsCan, pcodes, DTC_MAX) : PEND_ERROR;
+  if (!background) {
+    resp7.replace("\n", " ");
+    Serial.printf("[DTC] Anstehend (07): Antwort '%s' -> %d\n", resp7.c_str(), n7);
+  }
   resp.replace("\n", " ");
   Serial.printf("[DTC] %s: Antwort '%s' -> %d (%lu ms)\n", background ? "Pruefung" : "Auslesen",
                 resp.c_str(), n, (unsigned long)(millis() - t0));
@@ -2209,6 +2265,10 @@ static void elmFetchDTC(bool background) {
   if (n >= 0) {
     dtcCount = n;
     for (int i = 0; i < n; i++) dtcList[i] = String(codes[i]);
+    if (!background) {
+      pendCount = n7;
+      for (int i = 0; i < n7; i++) pendList[i] = String(pcodes[i]);
+    }
     gDtcState = DTC_DONE;
   } else {
     gDtcState = DTC_ERROR;
@@ -2221,9 +2281,17 @@ static void elmFetchDTC(bool background) {
 static uint8_t sElmSilent = 0;  // aufeinanderfolgende Kommandos ganz ohne Antwort
 static uint8_t sEcuFail = 0;    // aufeinanderfolgende PID-Abfragen ohne gueltige Daten
 
+// Mode-01-Anfrage senden, auf Wunsch als Schnellabfrage (siehe FAST_QUERY)
+static String obdSend(const char *cmd, bool fast) {
+  if (!fast) return elmSendCmd(cmd, 2500);
+  char c[12];
+  snprintf(c, sizeof(c), "%s1", cmd);
+  return elmSendCmd(c, 2500);
+}
+
 // PID abfragen + Verbindungsstatistik fuehren
-static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
-  String r = elmSendCmd(cmd, 2500);
+static bool obdQueryEx(const char *cmd, const char *tag, uint8_t &a, uint8_t &b, bool fast) {
+  String r = obdSend(cmd, fast);
   if (r.length() == 0) {
     if (sElmSilent < 255) sElmSilent++;
     return false;
@@ -2235,6 +2303,33 @@ static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
   }
   if (elmIsEcuError(r) && sEcuFail < 255) sEcuFail++;
   return false;
+}
+
+static bool obdQuery(const char *cmd, const char *tag, uint8_t &a, uint8_t &b) {
+  return obdQueryEx(cmd, tag, a, b, sFast == FAST_ON);
+}
+
+// Drehzahl lesen. Solange die Schnellabfrage noch nicht bestaetigt ist, abwechselnd ohne
+// und mit "1" fragen: klappt es mit, wird sie eingeschaltet; klappt es dreimal nur ohne,
+// bleibt sie bis zum naechsten ELM-Start aus.
+static bool queryRpm(uint8_t &a, uint8_t &b) {
+  if (sFast != FAST_TRY) return obdQuery("010C", "410C", a, b);
+  sFastTurn = !sFastTurn;
+  if (!sFastTurn) {
+    sFastPlainOk = obdQueryEx("010C", "410C", a, b, false);
+    return sFastPlainOk;
+  }
+  bool ok = obdQueryEx("010C1", "410C", a, b, false);   // "1" schon angehaengt
+  if (ok) {
+    sFast = FAST_ON;
+    Serial.println("[ELM] Schnellabfrage (010C1) funktioniert -> eingeschaltet");
+  } else if (sFastPlainOk) {
+    if (++sFastBad >= 3) {
+      sFast = FAST_OFF;
+      Serial.println("[ELM] Schnellabfrage wird vom Adapter nicht unterstuetzt -> aus");
+    }
+  }
+  return ok;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2423,7 +2518,7 @@ static void oilScanLive(void) {
 // PID 0x87 liefert ihn in 1/32 kPa bis 2048 kPa. Wird genutzt, wenn das Auto ihn kennt.
 
 static int obdQueryBytes(const char *cmd, const char *tag, uint8_t *out, int maxN) {
-  String r = elmSendCmd(cmd, 2500);
+  String r = obdSend(cmd, sFast == FAST_ON);
   if (r.length() == 0) { if (sElmSilent < 255) sElmSilent++; return 0; }
   sElmSilent = 0;
   int n = elmParseOBDBytes(r, tag, out, maxN);
@@ -2466,6 +2561,7 @@ static void pidResult(PidBackoff &p, bool ok, uint32_t now) {
 #define AMB_MS       10000UL   // Umgebungsdruck
 #define OIL_MAX_FAIL  5
 #define OIL_RETRY_MS 30000UL
+#define OIL_HOLD_N    3        // so viele Lesefehler hintereinander ueberbruecken (letzten Wert halten)
 
 // ── Schlaf-Entscheidung (im OBD-Task) ────────────────────────────
 static uint32_t sEcuAliveMs = 0;   // letzter Zeitpunkt, zu dem das Steuergeraet geantwortet hat
@@ -2513,7 +2609,8 @@ static void obdTask(void *param) {
   uint32_t tSlow = 0, tAmb = 0, tOilRetry = 0, tTiming = 0;
   uint32_t tDtc = millis() - DTC_CHECK_MS + DTC_FIRST_MS;   // erste Pruefung kurz nach dem Start
   PidBackoff boCat = {0, 0}, boTiming = {0, 0}, boIat = {0, 0}, boSpd = {0, 0};
-  uint8_t oilFail = 0;
+  uint8_t oilFail = 0, oilMiss = 0;
+  uint32_t tRate = millis(), nCycles = 0;
 
   for (;;) {
     if (gFetchDTC) {
@@ -2587,7 +2684,7 @@ static void obdTask(void *param) {
     uint32_t now = millis();
 
     // ── Schnelle Werte: JEDEN Zyklus (Drehzahl, Ladedruck) ─────────
-    if (obdQuery("010C", "410C", a, b)) {
+    if (queryRpm(a, b)) {
       rpm = ((int)a * 256 + b) / 4;
       // Auto antwortet jetzt -> Protokoll steht fest; falls beim Start noch unbekannt, nachholen
       if (!sProtoKnown) {
@@ -2668,8 +2765,9 @@ static void obdTask(void *param) {
         if (n >= 0 && oil_fml_eval(oilFml, d, n, &t)) {
           oil = (int)lroundf(t);
           oilOk = true;
-        } else {
-          oilOk = false;
+          oilMiss = 0;
+        } else if (!oilOk || ++oilMiss >= OIL_HOLD_N) {
+          oilOk = false;       // sonst: einzelner Aussetzer, letzten Wert stehen lassen
         }
       } else if (oilDue) {
         if (obdQuery("015C", "415C", a, b)) {
@@ -2710,6 +2808,8 @@ static void obdTask(void *param) {
     if (batt > 1.0f) rtcBatt = batt;
     if (sleepDue(ecuOk, batt, now)) goSleep(batt);
     if (!elmOk) Serial.println("[ELM] keine Antwort mehr -> Neuinitialisierung");
+    // Steuergeraet schweigt (Zuendung aus): keine alten Werte stehen lassen, sondern N/A
+    if (!ecuOk) { oilOk = false; catOk = false; timingOk = false; iatOk = false; spdOk = false; }
 
     xSemaphoreTake(dataMutex, portMAX_DELAY);
     gBatt = batt;
@@ -2728,6 +2828,15 @@ static void obdTask(void *param) {
     gEcuOK = ecuOk;
     gNewData = true;
     xSemaphoreGive(dataMutex);
+
+    // Alle 30 s die Abfragerate ins Log (zeigt, was die Schnellabfrage bringt)
+    nCycles++;
+    if (now - tRate >= 30000UL) {
+      Serial.printf("[OBD] %.1f Zyklen/s (Drehzahl + Ladedruck), Schnellabfrage %s\n",
+                    nCycles * 1000.0f / (now - tRate),
+                    sFast == FAST_ON ? "an" : sFast == FAST_OFF ? "aus" : "im Test");
+      tRate = now; nCycles = 0;
+    }
 
     delay(20); // kurze Pause, dann nächster Zyklus
   }
@@ -2809,10 +2918,21 @@ void setup() {
   rtc_gpio_deinit(LCD_BL_GPIO);
   rtc_gpio_deinit(TOUCH_INT_GPIO);   // Touch-INT wieder als normaler GPIO (Interrupt)
 
+  // Auf den seriellen Monitor nur warten, wenn wirklich ein Rechner am USB haengt.
+  // Im Auto (nur Strom, kein USB-Host) kostete das sonst bei jedem Start 3 s.
   Serial.begin(115200);
   uint32_t t0 = millis();
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE
+  // USB-Mode "Hardware CDC and JTAG" (Standard): isPlugged() erkennt den USB-Host
+  while (!Serial && millis() - t0 < 3000) {
+    if (millis() - t0 >= 300 && !Serial.isPlugged()) break;
+    delay(10);
+  }
+  if (Serial) delay(200);
+#else
   while (!Serial && millis() - t0 < 3000);
   delay(200);
+#endif
   Serial.println("\n=== OBD-II v7 ===");
   Serial.printf("[WAKE] Grund %d (0=Einschalten, 2=Touch, 4=Timer), Pruefungen im Schlaf: %lu, letzte Spannung %.1f V\n",
                 (int)esp_sleep_get_wakeup_cause(), (unsigned long)rtcChecks, rtcBatt);
