@@ -45,6 +45,15 @@ int main(){
   gBatt=14.4f; gOilTemp=105; gCatTemp=742; gCatOK=true; gTiming=-3.5f; gTimingOK=true; gIntakeTemp=54; gIntakeOK=true; gOilOK=true; gCoolant=90; gRPM=6500; gBoostBar=1.85f; gElmOK=gEcuOK=true;
   gAz=-0.45f; gAy=0.62f; gAxMax=-0.9f; gAyMax=0.8f;
   dtcCount=3; dtcList[0]="P0123"; dtcList[1]="U0100"; dtcList[2]="P0420"; gDtcState=DTC_DONE;
+  pendCount=3; pendList[0]="P0301"; pendList[1]="P0420"; pendList[2]="P0171";   // P0420 ist schon gespeichert
+  { // Auswertung Mode 07 (anstehende Codes): gleicher Aufbau wie Mode 03, Kennung 47
+    char c[DTC_MAX][6];
+    int n=dtc_parse("47 02 03 01 01 71 00", "47", true, c, DTC_MAX);
+    if(n!=2||strcmp(c[0],"P0301")||strcmp(c[1],"P0171")){printf("FEHLER dtc_parse 47 (%d)\n",n);return 2;}
+    if(dtc_parse("47 00", "47", true, c, DTC_MAX)!=0||dtc_parse("NO DATA", "47", true, c, DTC_MAX)!=0){printf("FEHLER dtc_parse 47 leer\n");return 2;}
+    if(dtc_parse("43 01 01 23", "47", true, c, DTC_MAX)!=-1||dtc_parse("43 01 01 23", "43", true, c, DTC_MAX)!=1){printf("FEHLER dtc_parse Kennung\n");return 2;}
+    if(dtc_parse("00A\n0: 47 04 01 23 04 56\n1: 07 89 0A BC 00 00", "47", true, c, DTC_MAX)!=4){printf("FEHLER dtc_parse 47 Multi-Frame\n");return 2;}
+  }
   // Oel-Suche: Live-Phase mit Beispiel-Kandidaten
   gScan.phase=SCAN_LIVE; gScan.hits=212; gScan.nCand=3; gOilDid=0x1002; gOilFml=0;
   snprintf(gScan.msg,sizeof(gScan.msg),"3 Kandidat(en), KW kalt 14 / warm 91 C.\nOel ist warm meist etwas ueber KW.\nKandidat LANG druecken = speichern.");
