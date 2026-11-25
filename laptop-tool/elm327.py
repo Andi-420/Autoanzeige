@@ -268,6 +268,33 @@ class ELM327:
                 break
         return pids
 
+    # ── Zündaussetzer pro Zylinder (Mode 06, nur lesend) ────────────
+
+    def read_misfire(self):
+        """Zündaussetzer-Zähler des Motorsteuergeräts.
+
+        Liefert [(MID, {'cur': ..., 'avg': ...}), ...], zuerst 'alle Zylinder' (A1),
+        dann Zylinder 1, 2, 3 ... (nur die, die das Steuergerät unterstützt).
+        """
+        if not self.protocol:
+            raise ElmError("Das Auto antwortet noch nicht. Zündung an und kurz warten.")
+        if not self.is_can:
+            raise ElmError("Die Zündaussetzer-Zähler (Mode 06) liest das Programm nur bei CAN-Fahrzeugen.")
+        self.set_header(True)
+        sup = self.query("06A0", "46A0", 3.0)
+        mids = sorted(dec.parse_supported(sup, 0xA0) & set(dec.MISFIRE_MIDS)) if sup else []
+        if not mids:
+            raise ElmError("Das Motorsteuergerät liefert keine Zündaussetzer-Zähler (Mode 06 "
+                           "MID A1 bis AD nicht unterstützt).")
+        out = []
+        for mid in mids:
+            tests = dec.parse_mode06(self.send("06%02X" % mid, 3.0), mid)
+            if tests is not None:
+                out.append((mid, dec.misfire_counts(tests)))
+        if not out:
+            raise ElmError("Keine gültige Antwort beim Lesen der Zündaussetzer (siehe Terminal).")
+        return out
+
     # ── Direkter Zugriff aufs Motorsteuergerät (UDS, nur lesend) ────
 
     def need_uds(self):

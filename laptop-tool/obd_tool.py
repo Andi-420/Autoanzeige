@@ -238,6 +238,21 @@ class Worker(threading.Thread):
         self.post("busy", "Lese Fehlercodes ...")
         self.post("dtcs", self.elm.read_dtcs())
 
+    def do_misfire(self, auto=False):
+        self._need()
+        if not auto:
+            self.post("busy", "Lese Zündaussetzer-Zähler ...")
+        try:
+            self.post("misfire", (self.elm.read_misfire(), auto))
+        except ElmError as e:
+            if not auto:
+                raise
+            self.post("misfire_fail", str(e))   # beim automatischen Lesen kein Fenster
+        except Exception:
+            if auto:
+                self.post("misfire_fail", "unerwarteter Fehler")
+            raise
+
     def do_clear_dtcs(self):
         self._need()
         self.post("busy", "Lösche Fehlercodes ...")
@@ -284,6 +299,10 @@ class App:
         self.rec = None             # (Datei, csv.writer, Startzeit, Zeilen)
         self.history, self.hist_pos = [], 0
         self.settings = self._load_settings()
+        self.mis_base = {}          # MID -> Zählerstand beim ersten Lesen (für "+N seit ...")
+        self.mis_since = None
+        self.mis_wait = False       # automatisches Lesen läuft gerade
+        self._mis_timer = None
         self.did_data = {}          # Kennnummer -> {"first": Bytes, "now": Bytes}
         self.scanning = False
 
@@ -305,6 +324,7 @@ class App:
         self.nb = nb
         self._build_live(nb)
         self._build_dtc(nb)
+        self._build_misfire(nb)
         self._build_ecu(nb)
         self._build_vehicle(nb)
         self._build_terminal(nb)
@@ -437,6 +457,88 @@ class App:
             "aus dem Fehlerspeicher des Motorsteuergeräts gelesen (UDS), dort stehen auch "
             "herstellerspezifische Codes mit Fehlerart. Beschreibungen nur für genormte Codes und ohne Gewähr.")
         ).pack(fill="x", pady=(4, 0))
+
+    def _build_misfire(self, nb):
+        tab = ttk.Frame(nb, padding=8)
+        nb.add(tab, text="  Zündaussetzer  ")
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", pady=(0, 8))
+        self.mis_btn = ttk.Button(bar, text="Zähler lesen", command=self.read_misfire)
+        self.mis_btn.pack(side="left")
+        self.mis_auto = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="alle 5 s neu lesen", variable=self.mis_auto,
+                        command=self._misfire_auto).pack(side="left", padx=12)
+        self.misbase_btn = ttk.Button(bar, text="Neu zählen ab jetzt", command=self._misfire_rebase)
+        self.misbase_btn.pack(side="left")
+        self.mis_lbl = ttk.Label(bar, text="", foreground=C_DIM)
+        self.mis_lbl.pack(side="right")
+        self.mis_grid = tk.Frame(tab, bg=C_BG, padx=6, pady=6)
+        self.mis_grid.pack(fill="both", expand=True)
+        self.mis_tiles = {}
+        self.mis_empty = ttk.Label(self.mis_grid, background=C_BG, foreground=C_DIM, text=(
+            "Noch nicht gelesen. Motor laufen lassen und „Zähler lesen“ drücken."))
+        self.mis_empty.pack(pady=30)
+        ttk.Label(tab, foreground=C_DIM, wraplength=900, justify="left", text=(
+            "Genormter Zündaussetzer-Test des Motorsteuergeräts (Mode 06, MID A1 bis AD), nur lesend. "
+            "Große Zahl = Aussetzer im aktuellen bzw. zuletzt abgeschlossenen Fahrzyklus, darunter der "
+            "Mittelwert der letzten 10 Fahrzyklen und wie viele seit dem ersten Lesen dazugekommen sind. "
+            "Manche Steuergeräte aktualisieren die Werte erst am Ende eines Fahrzyklus. Einzelne Aussetzer "
+            "sind normal; ein Zylinder, der deutlich mehr hat als die anderen, deutet auf Zündkerze, "
+            "Zündspule oder Einspritzdüse dieses Zylinders hin. Fehlercodes dazu: P0300 bis P0303.")
+        ).pack(fill="x", pady=(6, 0))
+
+    def _misfire_tiles(self, mids):
+        if sorted(self.mis_tiles) == sorted(mids):
+            return
+        for w in self.mis_grid.winfo_children():
+            w.destroy()
+        self.mis_tiles = {}
+        cols = 4
+        for i, mid in enumerate(mids):
+            r, c = divmod(i, cols)
+            t = tk.Frame(self.mis_grid, bg=C_TILE, highlightthickness=1,
+                         highlightbackground=C_BORDER, padx=10, pady=6)
+            t.grid(row=r, column=c, sticky="nsew", padx=4, pady=4)
+            tk.Label(t, text=dec.misfire_name(mid), bg=C_TILE, fg=C_DIM, font=self.f_title).pack(anchor="w")
+            row = tk.Frame(t, bg=C_TILE)
+            row.pack(anchor="w")
+            val = tk.Label(row, text="–", bg=C_TILE, fg=C_DIM, font=self.f_value)
+            val.pack(side="left")
+            tk.Label(row, text="Aussetzer", bg=C_TILE, fg=C_DIM, font=self.f_title).pack(
+                side="left", anchor="s", pady=(0, 8), padx=(4, 0))
+            sub = tk.Label(t, text="", bg=C_TILE, fg=C_DIM, font=self.f_small, justify="left")
+            sub.pack(anchor="w")
+            self.mis_tiles[mid] = (val, sub)
+        for c in range(cols):
+            self.mis_grid.columnconfigure(c, weight=1, uniform="mis")
+
+    def read_misfire(self):
+        self.worker.submit("misfire")
+
+    def _misfire_auto(self):
+        """Häkchen gesetzt: sofort lesen, danach alle 5 s (über _misfire_tick)."""
+        if self.mis_auto.get():
+            if not self.connected:
+                self.mis_auto.set(False)
+                self._status("Nicht verbunden.")
+                return
+            self._misfire_tick(start=True)
+
+    def _misfire_tick(self, start=False):
+        if not (self.mis_auto.get() and self.connected):
+            self._mis_timer = None
+            return
+        if start and self._mis_timer:
+            return                      # läuft schon
+        if not self.mis_wait:
+            self.mis_wait = True
+            self.worker.submit("misfire", auto=True)
+        self._mis_timer = self.root.after(5000, self._misfire_tick)
+
+    def _misfire_rebase(self):
+        self.mis_base = {}
+        self.mis_since = None
+        self.read_misfire()
 
     def _build_ecu(self, nb):
         tab = ttk.Frame(nb, padding=8)
@@ -615,10 +717,14 @@ class App:
         self.connected = on
         st = "normal" if on else "disabled"
         for b in (self.live_btn, self.max_btn, self.dtc_btn, self.clr_btn, self.veh_btn, self.send_btn,
-                  self.udsdtc_btn, self.ecuinfo_btn, self.did_btn, self.scan_btn, self.reread_btn):
+                  self.udsdtc_btn, self.ecuinfo_btn, self.did_btn, self.scan_btn, self.reread_btn,
+                  self.mis_btn, self.misbase_btn):
             b.configure(state=st)
+        self.mis_base, self.mis_since = {}, None    # neue Verbindung: neu zählen
         if not on:
             self._set_scanning(False)
+            self.mis_auto.set(False)
+            self.mis_wait = False
         self.port_cb.configure(state="disabled" if on else "readonly")
         self.conn_btn.configure(text="Trennen" if on else "Verbinden", state="normal")
         if on and info:
@@ -815,6 +921,44 @@ class App:
         notes.append("Gelesen um %s." % datetime.datetime.now().strftime("%H:%M:%S"))
         self.dtc_info.configure(text="  ".join(notes))
         self._status("Fehlercodes gelesen: %d." % n)
+
+    def on_misfire(self, data):
+        rows, auto = data
+        if auto:
+            self.mis_wait = False
+        self._misfire_tiles([mid for mid, _ in rows])
+        now = datetime.datetime.now().strftime("%H:%M:%S")
+        if self.mis_since is None:
+            self.mis_since = now
+        worst = None
+        for mid, cnt in rows:
+            val, sub = self.mis_tiles[mid]
+            cur, avg = cnt["cur"], cnt["avg"]
+            if cur is not None and (mid not in self.mis_base or cur < self.mis_base[mid]):
+                self.mis_base[mid] = cur    # neuer Fahrzyklus: Zähler fängt wieder bei 0 an
+            new = None if cur is None else cur - self.mis_base[mid]
+            col = C_DIM if cur is None else (C_GREEN if cur == 0 else C_ORANGE)
+            if new:
+                col = C_RED
+            val.configure(text="–" if cur is None else str(cur), fg=col)
+            lines = ["Mittel letzte 10 Fahrten: %s" % ("–" if avg is None else avg)]
+            if new is not None:
+                lines.append("seit %s: +%d" % (self.mis_since, new))
+            sub.configure(text="\n".join(lines))
+            if mid != dec.MISFIRE_TOTAL and cur and (worst is None or cur > worst[1]):
+                worst = (mid, cur)
+        info = "gelesen um %s" % now
+        if worst:
+            info = "meiste Aussetzer: %s  ·  %s" % (dec.misfire_name(worst[0]), info)
+        self.mis_lbl.configure(text=info, foreground=C_DIM)
+        if not auto:
+            self._status("Zündaussetzer gelesen.")
+
+    def on_misfire_fail(self, text):
+        self.mis_auto.set(False)
+        self.mis_wait = False
+        self.mis_lbl.configure(text="Automatisches Lesen gestoppt: %s" % text, foreground=C_RED)
+        self._status(text)
 
     def on_cleared(self, _):
         self._dtc_rows_clear("uds_")

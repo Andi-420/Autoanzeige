@@ -8,6 +8,7 @@ Auto (`OBD.ino`), also auch die Öltemperatur des Fabia 3 (`22 11BD` am Motorste
 |---|---|
 | **Live-Werte** | Drehzahl, Ladedruck (mit Maximum), Öl, Kühlwasser, Ansaugluft, Katalysator, Zündwinkel, Batterie, Geschwindigkeit, Motorlast, Drosselklappe, Saugrohrdruck. Auf Wunsch als CSV-Datei mitschreiben |
 | **Fehlercodes** | gespeicherte (Mode 03), anstehende (Mode 07) und permanente (Mode 0A) Codes aller abgasrelevanten Steuergeräte, Zustand der Motorkontrollleuchte. Dazu der Fehlerspeicher des Motorsteuergeräts direkt (UDS), mit herstellerspezifischen Codes und Fehlerart. Löschen (Mode 04) mit Sicherheitsabfrage |
+| **Zündaussetzer** | Aussetzer-Zähler pro Zylinder aus dem genormten Zündaussetzer-Test des Motorsteuergeräts (Mode 06): aktueller Fahrzyklus, Mittel der letzten 10 Fahrzyklen und was seit dem ersten Lesen dazugekommen ist. Auf Wunsch alle 5 s neu lesen. Nur lesend |
 | **Steuergerät** | direkter Zugriff aufs Motorsteuergerät (nur lesend): Teilenummer und Softwareversion, beliebige Kennnummern lesen (Mode 22), einen Bereich durchsuchen wie die Öl-Suche am Display, gefundene Werte als eigene Live-Kacheln speichern |
 | **Fahrzeug** | Fahrgestellnummer, Adapter, Protokoll, Spannung und die Liste der Werte, die das Auto über OBD liefert |
 | **Terminal** | eigene Befehle an den ELM327 schicken (z. B. `ATRV`, `010C`) und die komplette Kommunikation mitlesen |
@@ -46,6 +47,21 @@ Freeze-Frame-Daten und die Bereitschaftstests (Readiness) verloren; bis die nach
 wieder durchgelaufen sind, fällt das Auto bei der Abgasuntersuchung durch. Am besten bei
 **Motor aus, Zündung an** löschen. Permanente Codes lassen sich grundsätzlich nicht löschen, sie
 verschwinden erst, wenn das Steuergerät den Fehler bei späteren Fahrten nicht mehr feststellt.
+
+### Zündaussetzer pro Zylinder
+
+Im Reiter **Zündaussetzer** bei laufendem Motor **Zähler lesen** drücken. Für jeden Zylinder (beim
+1.0 TSI drei) und für alle zusammen gibt es eine Kachel:
+
+- **große Zahl:** Aussetzer im aktuellen bzw. zuletzt abgeschlossenen Fahrzyklus (Mode 06, TID 0C),
+- **Mittel letzte 10 Fahrten:** gleitender Mittelwert des Steuergeräts (TID 0B),
+- **seit …: +N:** wie viele seit dem ersten Lesen dazugekommen sind. „Neu zählen ab jetzt“ setzt das zurück.
+
+Mit **alle 5 s neu lesen** kann man z. B. im Leerlauf oder bei einer Probefahrt zusehen, ob ein
+Zylinder hochzählt. Die Live-Werte laufen dabei weiter. Manche Steuergeräte aktualisieren die Zähler
+erst am Ende eines Fahrzyklus; dann bleibt „+N“ während der Fahrt bei 0. Liefert das Motorsteuergerät
+diese Werte nicht, meldet das Programm „nicht unterstützt“. Technisch: `06A0` (welche MIDs gibt es),
+dann `06A1` (alle Zylinder) und `06A2` … `06AD` (Zylinder 1 … 12) an `7E0`.
 
 ### Steuergerät: Kennnummern suchen und als Live-Wert speichern
 

@@ -137,6 +137,26 @@ class UdsDecodeTest(unittest.TestCase):
         self.assertEqual(dec.ascii_text([0x0C, 0x6F]), "")
 
 
+class MisfireDecodeTest(unittest.TestCase):
+    def test_mode06_two_tests_multi_frame(self):
+        # Zylinder 1: Mittel 10 Fahrten = 4, aktuelle Fahrt = 7
+        r = "013\n0: 46 A2 0B 24 00 04\n1: 00 00 FF FF A2 0C 24\n2: 00 07 00 00 FF FF 00"
+        tests = dec.parse_mode06(r, 0xA2)
+        self.assertEqual(tests, [(0x0B, 0x24, 4, 0, 0xFFFF), (0x0C, 0x24, 7, 0, 0xFFFF)])
+        self.assertEqual(dec.misfire_counts(tests), {"cur": 7, "avg": 4})
+
+    def test_mode06_without_spaces_and_errors(self):
+        tests = dec.parse_mode06("46A10C240012000000FF", 0xA1)
+        self.assertEqual(dec.misfire_counts(tests), {"cur": 0x12, "avg": None})
+        self.assertIsNone(dec.parse_mode06("NO DATA", 0xA2))
+        self.assertIsNone(dec.parse_mode06("46 A3 0B 24 00 00 00 00 FF FF", 0xA2))
+        self.assertEqual(dec.misfire_counts(None), {"cur": None, "avg": None})
+
+    def test_misfire_names(self):
+        self.assertEqual(dec.misfire_name(0xA1), "Alle Zylinder")
+        self.assertEqual(dec.misfire_name(0xA4), "Zylinder 3")
+
+
 class SimulatorTest(unittest.TestCase):
     def setUp(self):
         self.elm = ELM327(SimulatedELM(speed=20))
@@ -212,6 +232,24 @@ class SimulatorTest(unittest.TestCase):
         self.assertAlmostEqual(v["did_1040"], v["coolant"], delta=1.0)
         lr.set_custom([])
         self.assertNotIn("did_1040", lr.cycle())
+
+    def test_misfire(self):
+        rows = self.elm.read_misfire()
+        self.assertEqual([m for m, _ in rows], [0xA1, 0xA2, 0xA3, 0xA4])
+        c = dict(rows)
+        self.assertEqual(c[0xA2]["avg"], 4)
+        self.assertEqual(c[0xA3], {"cur": 0, "avg": 1})
+        self.assertEqual(c[0xA1]["cur"], c[0xA2]["cur"])
+        self.assertTrue(self.elm.header_phys)
+
+    def test_misfire_not_supported(self):
+        self.elm.port._obd_orig = self.elm.port._obd
+        self.elm.port._obd = lambda c: "NO DATA" if c.startswith("06") else self.elm.port._obd_orig(c)
+        with self.assertRaises(ElmError):
+            self.elm.read_misfire()
+        self.elm.is_can = False
+        with self.assertRaises(ElmError):
+            self.elm.read_misfire()
 
     def test_uds_needs_can(self):
         self.elm.is_can = False
