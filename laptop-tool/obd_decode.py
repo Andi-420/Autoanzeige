@@ -496,3 +496,49 @@ def uds_status_text(st):
     if st & 0x80:
         parts.append("Warnleuchte an")
     return ", ".join(parts) or "Status 0x%02X" % st
+
+
+# ── Zündaussetzer (Mode 06, Misfire Monitor) ─────────────────────────
+#
+# Bei CAN liefert das Steuergerät auf "06 <MID>" je Test einen Block aus 9 Bytes:
+#   MID, TID, Einheit (UASID), Messwert (2), unterer Grenzwert (2), oberer Grenzwert (2)
+# MID A1 = alle Zylinder zusammen, A2 = Zylinder 1 ... AD = Zylinder 12.
+# TID 0B = gleitender Mittelwert der letzten 10 Fahrzyklen,
+# TID 0C = Aussetzer im aktuellen bzw. zuletzt abgeschlossenen Fahrzyklus.
+
+MISFIRE_TOTAL = 0xA1
+MISFIRE_MIDS = range(0xA1, 0xAE)
+TID_MISFIRE_AVG, TID_MISFIRE_CUR = 0x0B, 0x0C
+
+
+def misfire_name(mid):
+    return "Alle Zylinder" if mid == MISFIRE_TOTAL else "Zylinder %d" % (mid - MISFIRE_TOTAL)
+
+
+def parse_mode06(resp, mid):
+    """Antwort auf '06 <MID>' -> [(TID, Einheit, Wert, Min, Max), ...] oder None."""
+    want = "46%02X" % mid
+    for m in messages(resp):
+        if not m.startswith(want):
+            continue
+        data = hex_bytes(m[2:])
+        out = []
+        for i in range(0, len(data) - 8, 9):
+            blk = data[i:i + 9]
+            if blk[0] != mid:
+                break
+            out.append((blk[1], blk[2], (blk[3] << 8) | blk[4],
+                        (blk[5] << 8) | blk[6], (blk[7] << 8) | blk[8]))
+        return out
+    return None
+
+
+def misfire_counts(tests):
+    """Aus den Tests eines Misfire-MIDs: {'cur': Aussetzer aktuelle Fahrt, 'avg': Mittel 10 Fahrten}."""
+    res = {"cur": None, "avg": None}
+    for tid, _uas, val, _lo, _hi in tests or []:
+        if tid == TID_MISFIRE_CUR:
+            res["cur"] = val
+        elif tid == TID_MISFIRE_AVG:
+            res["avg"] = val
+    return res

@@ -3,7 +3,8 @@
 Verhält sich nach außen wie ein pyserial-Port (write/read/in_waiting/...)
 und antwortet wie ein ELM327 an einem Fabia 3 mit CAN-Bus: Motor läuft in
 einer 20-Sekunden-Schleife Leerlauf, Beschleunigen, Schalten, Ausrollen,
-Öl und Kühlwasser werden langsam warm. Ein paar Fehlercodes sind gespeichert.
+Öl und Kühlwasser werden langsam warm. Ein paar Fehlercodes sind gespeichert,
+Zylinder 1 hat ab und zu Zündaussetzer (Mode 06).
 """
 
 import math
@@ -187,6 +188,13 @@ class SimulatedELM:
             0x2004: lambda: [0x12, 0x34, 0x56, 0x78],         # fester Wert
         }.get(did, lambda: None)()
 
+    def _misfire(self):
+        """Zündaussetzer je MID: (Mittel 10 Fahrten, aktuelle Fahrt). Zylinder 1 setzt ab und zu aus."""
+        t = (time.monotonic() - self.t0) * self.speed
+        cyl = {0xA2: (4, int(t / 6)), 0xA3: (1, 0), 0xA4: (0, 0)}
+        cyl[0xA1] = (sum(v[0] for v in cyl.values()), sum(v[1] for v in cyl.values()))
+        return cyl
+
     def _obd(self, c):
         mode, rest = c[:2], c[2:]
         s = self._state()
@@ -242,6 +250,19 @@ class SimulatedELM:
             if data is None:
                 return self._fmt([0x7F, 0x22, 0x31])
             return self._frames([0x62, did >> 8, did & 0xFF] + data)
+
+        if mode == "06" and len(rest) == 2:
+            mid = int(rest, 16)
+            if mid == 0xA0:                         # unterstützt: A1 (gesamt) und A2..A4 (3 Zylinder)
+                return self._fmt([0x46, 0xA0, 0xF0, 0x00, 0x00, 0x00])
+            counts = self._misfire()
+            if mid not in counts:
+                return "NO DATA"
+            avg, cur = counts[mid]
+            data = [0x46]
+            for tid, val in ((0x0B, avg), (0x0C, cur)):
+                data += [mid, tid, 0x24, val >> 8, val & 0xFF, 0, 0, 0xFF, 0xFF]
+            return self._frames(data)
 
         if c == "1902FF":
             if self.header != "7E0":
